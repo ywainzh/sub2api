@@ -30,6 +30,12 @@ git commit -m "<message>"
 git push origin release
 ```
 
+## 版本发布
+
+二开版本只从 `release` 创建，采用不可复用的语义化 tag：`v0.1.0`、`v0.1.1`、`v0.1.2`。不要使用日期 tag 或 `latest`，也不要在 `main` 创建发布 tag。
+
+完整的构建、GHCR 发布、服务器部署、升级、回滚和备份流程见 [轻量生产部署手册](deploy/lite/README.md)。发布前必须确认 GitHub Actions 的 `Publish Lite Release`、`CI` 和 `Security Scan` 均成功。
+
 ## 同步官方上游
 
 同步前必须提交或暂存当前修改，确保 `git status` 显示工作区干净。然后先更新镜像分支 `main`：

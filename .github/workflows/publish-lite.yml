@@ -3,7 +3,7 @@ name: Publish Lite Release
 on:
   push:
     tags:
-      - "release-*"
+      - "v*"
 
 permissions:
   contents: write
@@ -27,6 +27,10 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
+          if [[ ! "${GITHUB_REF_NAME}" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+            echo "Tag must use the vX.Y.Z format, for example v0.1.0" >&2
+            exit 1
+          fi
           git fetch origin release
           tag_commit="$(git rev-list -n 1 "${GITHUB_REF_NAME}")"
           if ! git merge-base --is-ancestor "${tag_commit}" origin/release; then
