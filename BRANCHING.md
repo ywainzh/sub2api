@@ -66,4 +66,3 @@ git log --oneline --graph --decorate --all -30
 4. 使用 `git commit` 完成合并提交，再运行 `git push origin release`。
 
 如果暂时无法确认正确处理方式，可使用 `git merge --abort` 放弃本次合并，仓库会恢复到合并前的状态。
-
