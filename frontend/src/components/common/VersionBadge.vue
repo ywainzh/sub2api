@@ -651,9 +651,9 @@ import {
 import { useClipboard } from '@/composables/useClipboard'
 import Icon from '@/components/icons/Icon.vue'
 
-const GITHUB_REPO = 'Wei-Shaw/sub2api'
-// Docker Hub image published by CI (tags carry no "v" prefix, e.g. weishaw/sub2api:0.1.146)
-const DOCKER_IMAGE = 'weishaw/sub2api'
+const GITHUB_REPO = 'ywainzh/sub2api'
+// Production images are published to the fork's GHCR package with semantic version tags.
+const DOCKER_IMAGE = 'ghcr.io/ywainzh/sub2api'
 
 const { t } = useI18n()
 
@@ -671,8 +671,12 @@ const dropdownRef = ref<HTMLElement | null>(null)
 
 // Use store's cached version state
 const loading = computed(() => appStore.versionLoading)
-const currentVersion = computed(() => appStore.currentVersion || props.version || '')
-const latestVersion = computed(() => appStore.latestVersion)
+function displayVersion(version: string): string {
+  return version.replace(/^v/i, '')
+}
+
+const currentVersion = computed(() => displayVersion(appStore.currentVersion || props.version || ''))
+const latestVersion = computed(() => displayVersion(appStore.latestVersion))
 const hasUpdate = computed(() => appStore.hasUpdate)
 const releaseInfo = computed(() => appStore.releaseInfo)
 const buildType = computed(() => appStore.buildType)
@@ -717,9 +721,10 @@ const dockerRollbackCommand = computed(() => {
   if (!selectedRollbackVersion.value) return ''
   return [
     `# ${t('version.dockerEditCompose')}`,
-    `image: ${DOCKER_IMAGE}:${selectedRollbackVersion.value}`,
+    `APP_IMAGE=${DOCKER_IMAGE}:v${selectedRollbackVersion.value}`,
     '',
     `# ${t('version.dockerRecreate')}`,
+    'docker compose pull',
     'docker compose up -d'
   ].join('\n')
 })

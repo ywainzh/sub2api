@@ -24,7 +24,7 @@ services:
   # Sub2API Application
   # ===========================================================================
   sub2api:
-    image: weishaw/sub2api:latest
+    image: ghcr.io/ywainzh/sub2api:v0.1.0
     container_name: sub2api
     restart: unless-stopped
     ulimits:
