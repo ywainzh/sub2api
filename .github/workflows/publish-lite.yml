@@ -1,0 +1,166 @@
+name: Publish Lite Release
+
+on:
+  push:
+    tags:
+      - "release-*"
+
+permissions:
+  contents: write
+  packages: write
+
+concurrency:
+  group: publish-lite-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Check out tagged source
+        uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
+
+      - name: Verify release branch source
+        shell: bash
+        run: |
+          set -euo pipefail
+          git fetch origin release
+          tag_commit="$(git rev-list -n 1 "${GITHUB_REF_NAME}")"
+          if ! git merge-base --is-ancestor "${tag_commit}" origin/release; then
+            echo "Tag ${GITHUB_REF_NAME} is not based on origin/release" >&2
+            exit 1
+          fi
+
+      - name: Set up pnpm
+        uses: pnpm/action-setup@v6
+        with:
+          version: 9
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v6
+        with:
+          node-version: "20"
+          cache: pnpm
+          cache-dependency-path: frontend/pnpm-lock.yaml
+
+      - name: Install frontend dependencies
+        working-directory: frontend
+        run: pnpm install --frozen-lockfile
+
+      - name: Check and build frontend
+        working-directory: frontend
+        run: |
+          pnpm run typecheck
+          pnpm run build
+
+      - name: Set up Go
+        uses: actions/setup-go@v6
+        with:
+          go-version-file: backend/go.mod
+          check-latest: false
+          cache-dependency-path: backend/go.sum
+
+      - name: Test backend
+        working-directory: backend
+        run: go test ./...
+
+      - name: Build linux/amd64 binary
+        working-directory: backend
+        shell: bash
+        run: |
+          set -euo pipefail
+          build_date="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+          CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build \
+            -tags embed \
+            -trimpath \
+            -ldflags="-s -w -X main.Version=${GITHUB_REF_NAME} -X main.Commit=${GITHUB_SHA} -X main.Date=${build_date} -X main.BuildType=release" \
+            -o ../sub2api \
+            ./cmd/server
+
+      - name: Validate lite Compose configuration
+        shell: bash
+        env:
+          APP_IMAGE: ghcr.io/ywainzh/sub2api:${{ github.ref_name }}
+          POSTGRES_PASSWORD: ci-postgres-password
+          REDIS_PASSWORD: ci-redis-password
+          JWT_SECRET: 0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef
+          TOTP_ENCRYPTION_KEY: 0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef
+          ADMIN_PASSWORD: ci-admin-password
+        run: docker compose -f deploy/lite/docker-compose.yml config --quiet
+
+      - name: Package release assets
+        shell: bash
+        run: |
+          set -euo pipefail
+          binary_dir="release-assets/sub2api-linux-amd64"
+          deploy_dir="release-assets/sub2api-deploy-${GITHUB_REF_NAME}"
+          mkdir -p "${binary_dir}" "${deploy_dir}"
+          cp sub2api LICENSE README.md README_CN.md "${binary_dir}/"
+          cp -a deploy/lite/. "${deploy_dir}/"
+          tar -czf release-assets/sub2api-linux-amd64.tar.gz -C "${binary_dir}" .
+          tar -czf "release-assets/sub2api-deploy-${GITHUB_REF_NAME}.tar.gz" -C "${deploy_dir}" .
+          cd release-assets
+          sha256sum sub2api-linux-amd64.tar.gz "sub2api-deploy-${GITHUB_REF_NAME}.tar.gz" > checksums.txt
+
+      - name: Log in to GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.repository_owner }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Build and push runtime image
+        id: image
+        shell: bash
+        run: |
+          set -euo pipefail
+          image="ghcr.io/${GITHUB_REPOSITORY,,}:${GITHUB_REF_NAME}"
+          docker buildx build \
+            --platform linux/amd64 \
+            --file Dockerfile.goreleaser \
+            --label "org.opencontainers.image.source=https://github.com/${GITHUB_REPOSITORY}" \
+            --label "org.opencontainers.image.version=${GITHUB_REF_NAME}" \
+            --label "org.opencontainers.image.revision=${GITHUB_SHA}" \
+            --cache-from type=gha \
+            --cache-to type=gha,mode=max \
+            --tag "${image}" \
+            --push \
+            .
+          docker buildx imagetools inspect "${image}"
+          echo "name=${image}" >> "${GITHUB_OUTPUT}"
+
+      - name: Make GHCR package public
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: gh api --method PATCH /user/packages/container/sub2api -f visibility=public
+
+      - name: Create GitHub Release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          IMAGE_NAME: ${{ steps.image.outputs.name }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          cat > release-assets/release-notes.md <<EOF
+          ## Lite deployment release
+
+          - Source branch: \`release\`
+          - Source commit: \`${GITHUB_SHA}\`
+          - Runtime image: \`${IMAGE_NAME}\`
+          - Architecture: \`linux/amd64\`
+
+          The server only needs the deployment archive and Docker Compose. It does not compile source code.
+          EOF
+          gh release create "${GITHUB_REF_NAME}" \
+            release-assets/sub2api-linux-amd64.tar.gz \
+            "release-assets/sub2api-deploy-${GITHUB_REF_NAME}.tar.gz" \
+            release-assets/checksums.txt \
+            --verify-tag \
+            --title "Sub2API Lite ${GITHUB_REF_NAME}" \
+            --notes-file release-assets/release-notes.md

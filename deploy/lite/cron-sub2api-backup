@@ -1,0 +1,5 @@
+SHELL=/bin/sh
+PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+CRON_TZ=Asia/Shanghai
+
+15 3 * * * root cd /opt/sub2api && /usr/bin/flock -n /run/lock/sub2api-backup.lock ./backup.sh >/dev/null 2>&1
