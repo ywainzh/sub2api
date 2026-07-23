@@ -451,8 +451,8 @@ func (s *UpdateService) fetchLatestRelease(ctx context.Context) (*UpdateInfo, er
 			HTMLURL:     release.HTMLURL,
 			Assets:      assets,
 		},
-		Cached:    false,
-		BuildType: s.buildType,
+		Cached:         false,
+		BuildType:      s.buildType,
 		DeploymentMode: s.deploymentMode,
 	}, nil
 }
