@@ -233,14 +233,7 @@ const routes: RouteRecordRaw[] = [
   {
     path: '/redeem',
     name: 'Redeem',
-    component: () => import('@/views/user/RedeemView.vue'),
-    meta: {
-      requiresAuth: true,
-      requiresAdmin: false,
-      title: 'Redeem Code',
-      titleKey: 'redeem.title',
-      descriptionKey: 'redeem.description'
-    }
+    redirect: '/dashboard'
   },
   {
     path: '/affiliate',
@@ -281,14 +274,7 @@ const routes: RouteRecordRaw[] = [
   {
     path: '/subscriptions',
     name: 'Subscriptions',
-    component: () => import('@/views/user/SubscriptionsView.vue'),
-    meta: {
-      requiresAuth: true,
-      requiresAdmin: false,
-      title: 'My Subscriptions',
-      titleKey: 'userSubscriptions.title',
-      descriptionKey: 'userSubscriptions.description'
-    }
+    redirect: '/dashboard'
   },
   {
     path: '/purchase',
