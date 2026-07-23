@@ -63,11 +63,18 @@ type AccountHandler struct {
 	tokenCacheInvalidator   service.TokenCacheInvalidator
 	grokImportProber        grokImportProber
 	upstreamBillingProbe    *service.UpstreamBillingProbeService
+	accountStatusCheck      *service.AccountStatusCheckService
 }
 
 // SetUpstreamBillingProbeService attaches the optional remote billing probe service.
 func (h *AccountHandler) SetUpstreamBillingProbeService(probe *service.UpstreamBillingProbeService) {
 	h.upstreamBillingProbe = probe
+}
+
+// SetAccountStatusCheckService attaches the batch OpenAI account checker while
+// keeping NewAccountHandler stable for focused unit tests.
+func (h *AccountHandler) SetAccountStatusCheckService(statusCheck *service.AccountStatusCheckService) {
+	h.accountStatusCheck = statusCheck
 }
 
 // NewAccountHandler creates a new admin account handler
@@ -1071,6 +1078,85 @@ func (h *AccountHandler) Test(c *gin.Context) {
 		if _, err := h.rateLimitService.RecoverAccountAfterSuccessfulTest(c.Request.Context(), accountID); err != nil {
 			_ = c.Error(err)
 		}
+	}
+}
+
+// StatusCheck tests every non-deleted account in an OpenAI group and streams
+// progress as SSE. The task is canceled when the client disconnects.
+// POST /api/v1/admin/accounts/status-check
+func (h *AccountHandler) StatusCheck(c *gin.Context) {
+	if h.accountStatusCheck == nil {
+		response.Error(c, http.StatusServiceUnavailable, "Account status check service unavailable")
+		return
+	}
+
+	var req service.AccountStatusCheckRequest
+	if err := c.ShouldBindJSON(&req); err != nil {
+		response.BadRequest(c, "Invalid request body")
+		return
+	}
+
+	task, err := h.accountStatusCheck.Start(c.Request.Context(), req)
+	if err != nil {
+		response.ErrorFrom(c, err)
+		return
+	}
+	defer task.Close()
+
+	c.Writer.Header().Set("Content-Type", "text/event-stream")
+	c.Writer.Header().Set("Cache-Control", "no-cache")
+	c.Writer.Header().Set("Connection", "keep-alive")
+	c.Writer.Header().Set("X-Accel-Buffering", "no")
+	c.Writer.WriteHeaderNow()
+	c.Writer.Flush()
+
+	var writeMu sync.Mutex
+	writeEvent := func(event service.AccountStatusCheckEvent) error {
+		payload, marshalErr := json.Marshal(event)
+		if marshalErr != nil {
+			return marshalErr
+		}
+		writeMu.Lock()
+		defer writeMu.Unlock()
+		if _, writeErr := fmt.Fprintf(c.Writer, "event: %s\ndata: %s\n\n", event.Type, payload); writeErr != nil {
+			return writeErr
+		}
+		c.Writer.Flush()
+		return nil
+	}
+
+	done := make(chan struct{})
+	var heartbeatWG sync.WaitGroup
+	heartbeatWG.Add(1)
+	go func() {
+		defer heartbeatWG.Done()
+		ticker := time.NewTicker(15 * time.Second)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-done:
+				return
+			case <-c.Request.Context().Done():
+				return
+			case <-ticker.C:
+				writeMu.Lock()
+				_, heartbeatErr := fmt.Fprint(c.Writer, ": heartbeat\n\n")
+				if heartbeatErr == nil {
+					c.Writer.Flush()
+				}
+				writeMu.Unlock()
+				if heartbeatErr != nil {
+					return
+				}
+			}
+		}
+	}()
+
+	err = task.Run(c.Request.Context(), writeEvent)
+	close(done)
+	heartbeatWG.Wait()
+	if err != nil && c.Request.Context().Err() == nil {
+		_ = c.Error(err)
 	}
 }
 

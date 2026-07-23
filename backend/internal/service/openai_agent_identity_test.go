@@ -8,6 +8,7 @@ import (
 	"crypto/x509"
 	"encoding/base64"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
@@ -16,6 +17,8 @@ import (
 	"testing"
 	"time"
 
+	"github.com/Wei-Shaw/sub2api/internal/config"
+	"github.com/gin-gonic/gin"
 	"github.com/stretchr/testify/require"
 	"golang.org/x/crypto/curve25519"
 	"golang.org/x/crypto/nacl/box"
@@ -125,6 +128,214 @@ func TestRegisterAgentIdentityTaskAcceptsPlaintextAndEncryptedResponses(t *testi
 	taskID, err = registerAgentIdentityTask(context.Background(), account)
 	require.NoError(t, err)
 	require.Equal(t, "task-encrypted", taskID)
+}
+
+func TestRegisterAgentIdentityTaskPreservesBoundedErrorMetadataWithoutLeakingBody(t *testing.T) {
+	_, privateKey := newTestAgentIdentityKey(t)
+	secret := "refresh_token=must-not-leak"
+	body := strings.Repeat("x", agentIdentityRegistrationBodyLimit) + secret
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Retry-After", "37")
+		w.WriteHeader(http.StatusForbidden)
+		_, _ = w.Write([]byte(body))
+	}))
+	defer server.Close()
+	oldBase := openAIAgentIdentityAuthAPIBaseURL
+	openAIAgentIdentityAuthAPIBaseURL = server.URL
+	t.Cleanup(func() { openAIAgentIdentityAuthAPIBaseURL = oldBase })
+
+	account := &Account{ID: 2, Type: AccountTypeOAuth, Platform: PlatformOpenAI, Credentials: map[string]any{
+		"auth_mode":         OpenAIAuthModeAgentIdentity,
+		"agent_runtime_id":  "runtime-test",
+		"agent_private_key": privateKey,
+	}}
+	_, err := registerAgentIdentityTask(context.Background(), account)
+	var registrationErr *AgentIdentityRegistrationError
+	require.True(t, errors.As(err, &registrationErr))
+	require.Equal(t, http.StatusForbidden, registrationErr.StatusCode)
+	require.Equal(t, "37", registrationErr.ResponseHeaders.Get("Retry-After"))
+	require.Len(t, registrationErr.ResponseBody, agentIdentityRegistrationBodyLimit)
+	require.NotContains(t, err.Error(), secret)
+	require.NotContains(t, err.Error(), "xxxxxxxx")
+}
+
+func TestRegisterAgentIdentityTaskWrapsTransportAndCredentialFailures(t *testing.T) {
+	_, privateKey := newTestAgentIdentityKey(t)
+	account := &Account{ID: 3, Type: AccountTypeOAuth, Platform: PlatformOpenAI, Credentials: map[string]any{
+		"auth_mode":         OpenAIAuthModeAgentIdentity,
+		"agent_runtime_id":  "runtime-test",
+		"agent_private_key": privateKey,
+	}}
+	oldBase := openAIAgentIdentityAuthAPIBaseURL
+	openAIAgentIdentityAuthAPIBaseURL = "http://127.0.0.1:1"
+	t.Cleanup(func() { openAIAgentIdentityAuthAPIBaseURL = oldBase })
+
+	_, err := registerAgentIdentityTask(context.Background(), account)
+	var registrationErr *AgentIdentityRegistrationError
+	require.True(t, errors.As(err, &registrationErr))
+	require.Zero(t, registrationErr.StatusCode)
+	require.Equal(t, "agent identity task registration request failed", registrationErr.Error())
+
+	invalid := &Account{ID: 4, Type: AccountTypeOAuth, Platform: PlatformOpenAI, Credentials: map[string]any{
+		"auth_mode":        OpenAIAuthModeAgentIdentity,
+		"agent_runtime_id": "runtime-test",
+	}}
+	_, err = registerAgentIdentityTask(context.Background(), invalid)
+	var credentialErr *agentIdentityCredentialError
+	require.True(t, errors.As(err, &credentialErr))
+	require.NotContains(t, err.Error(), "private")
+}
+
+func TestAgentIdentityAuthenticationFailureUsesOpenAIAccountPoliciesAndFailover(t *testing.T) {
+	t.Run("403 cooldown then permanent error", func(t *testing.T) {
+		repo := &agentIdentityStateRepo{}
+		rateLimit := NewRateLimitService(repo, nil, &config.Config{}, nil, nil)
+		counter := &agentIdentity403CounterStub{counts: []int64{1, 3}}
+		rateLimit.SetOpenAI403CounterCache(counter)
+		gateway := &OpenAIGatewayService{accountRepo: repo, rateLimitService: rateLimit}
+		rateLimit.SetAccountRuntimeBlocker(gateway)
+		account := testAgentIdentityAccount(11)
+
+		first := gateway.handleAgentIdentityAuthenticationFailure(context.Background(), account, &AgentIdentityRegistrationError{
+			StatusCode:      http.StatusForbidden,
+			ResponseHeaders: http.Header{},
+			ResponseBody:    []byte(`{"error":{"message":"registration forbidden"}}`),
+		}, "gpt-5")
+		require.Equal(t, NextAccountRetry, first.NextAccountAction)
+		require.Equal(t, 1, repo.tempCalls)
+		require.Equal(t, 0, repo.setErrorCalls)
+
+		second := gateway.handleAgentIdentityAuthenticationFailure(context.Background(), account, &AgentIdentityRegistrationError{
+			StatusCode:   http.StatusForbidden,
+			ResponseBody: []byte(`{"error":{"message":"registration forbidden"}}`),
+		}, "gpt-5")
+		require.Equal(t, NextAccountRetry, second.NextAccountAction)
+		require.Equal(t, 1, repo.setErrorCalls)
+	})
+
+	t.Run("429 cooldown", func(t *testing.T) {
+		repo := &agentIdentityStateRepo{}
+		rateLimit := NewRateLimitService(repo, nil, &config.Config{}, nil, nil)
+		gateway := &OpenAIGatewayService{accountRepo: repo, rateLimitService: rateLimit}
+		rateLimit.SetAccountRuntimeBlocker(gateway)
+		account := testAgentIdentityAccount(12)
+
+		failover := gateway.handleAgentIdentityAuthenticationFailure(context.Background(), account, &AgentIdentityRegistrationError{
+			StatusCode: http.StatusTooManyRequests,
+		}, "gpt-5")
+		require.Equal(t, NextAccountRetry, failover.NextAccountAction)
+		require.Equal(t, 1, repo.rateLimitedCalls)
+	})
+
+	t.Run("5xx is temporary", func(t *testing.T) {
+		repo := &agentIdentityStateRepo{}
+		gateway := &OpenAIGatewayService{accountRepo: repo}
+		account := testAgentIdentityAccount(13)
+
+		failover := gateway.handleAgentIdentityAuthenticationFailure(context.Background(), account, &AgentIdentityRegistrationError{StatusCode: http.StatusBadGateway})
+		require.Equal(t, NextAccountRetry, failover.NextAccountAction)
+		require.Equal(t, 1, repo.tempCalls)
+		require.Equal(t, 0, repo.setErrorCalls)
+	})
+
+	t.Run("local credentials are permanent", func(t *testing.T) {
+		repo := &agentIdentityStateRepo{}
+		gateway := &OpenAIGatewayService{accountRepo: repo}
+		account := testAgentIdentityAccount(14)
+
+		failover := gateway.handleAgentIdentityAuthenticationFailure(context.Background(), account, &agentIdentityCredentialError{cause: errors.New("missing key")})
+		require.Equal(t, GatewayFailureStageAccountAuth, failover.Stage)
+		require.Equal(t, GatewayFailureScopeAccount, failover.Scope)
+		require.Equal(t, NextAccountRetry, failover.NextAccountAction)
+		require.Equal(t, 1, repo.setErrorCalls)
+		require.Equal(t, 0, repo.tempCalls)
+	})
+}
+
+func TestAccountTestAgentIdentityAuthenticationFailureUsesSharedHandler(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	handler := &agentIdentityFailureHandlerStub{}
+	service := &AccountTestService{agentIdentityAuthFailures: handler}
+	var event TestEvent
+	recorder := httptest.NewRecorder()
+	c, _ := gin.CreateTestContext(recorder)
+	c.Request = (&http.Request{}).WithContext(context.WithValue(context.Background(), accountTestEventSinkContextKey{}, AccountTestEventSink(func(got TestEvent) {
+		event = got
+	})))
+
+	err := service.sendAgentIdentityAuthenticationErrorAndEnd(
+		c,
+		c.Request.Context(),
+		testAgentIdentityAccount(15),
+		"gpt-5",
+		&AgentIdentityRegistrationError{StatusCode: http.StatusForbidden},
+	)
+
+	require.Error(t, err)
+	require.Equal(t, 1, handler.calls)
+	require.Equal(t, http.StatusForbidden, event.HTTPStatus)
+	require.True(t, event.AccountStateHandled)
+	require.NotContains(t, event.Error, "must-not-leak")
+}
+
+func testAgentIdentityAccount(id int64) *Account {
+	return &Account{ID: id, Type: AccountTypeOAuth, Platform: PlatformOpenAI, Status: "active", Schedulable: true, Credentials: map[string]any{
+		"auth_mode":        OpenAIAuthModeAgentIdentity,
+		"agent_runtime_id": "runtime-test",
+	}}
+}
+
+type agentIdentityStateRepo struct {
+	AccountRepository
+	setErrorCalls    int
+	tempCalls        int
+	rateLimitedCalls int
+}
+
+func (r *agentIdentityStateRepo) SetError(context.Context, int64, string) error {
+	r.setErrorCalls++
+	return nil
+}
+
+func (r *agentIdentityStateRepo) SetTempUnschedulable(context.Context, int64, time.Time, string) error {
+	r.tempCalls++
+	return nil
+}
+
+func (r *agentIdentityStateRepo) SetRateLimited(context.Context, int64, time.Time) error {
+	r.rateLimitedCalls++
+	return nil
+}
+
+type agentIdentity403CounterStub struct {
+	counts []int64
+}
+
+func (s *agentIdentity403CounterStub) IncrementOpenAI403Count(context.Context, int64, int) (int64, error) {
+	if len(s.counts) == 0 {
+		return 1, nil
+	}
+	count := s.counts[0]
+	s.counts = s.counts[1:]
+	return count, nil
+}
+
+func (s *agentIdentity403CounterStub) ResetOpenAI403Count(context.Context, int64) error {
+	return nil
+}
+
+type agentIdentityFailureHandlerStub struct {
+	calls int
+}
+
+func (s *agentIdentityFailureHandlerStub) handleAgentIdentityAuthenticationFailure(context.Context, *Account, error, ...string) *UpstreamFailoverError {
+	s.calls++
+	return &UpstreamFailoverError{
+		StatusCode:        http.StatusForbidden,
+		Stage:             GatewayFailureStageAccountAuth,
+		Scope:             GatewayFailureScopeAccount,
+		NextAccountAction: NextAccountRetry,
+	}
 }
 
 func TestEnsureAgentIdentityTaskPersistsAndRedactsCredentials(t *testing.T) {

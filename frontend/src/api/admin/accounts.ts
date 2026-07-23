@@ -3,7 +3,8 @@
  * Handles AI platform account management for administrators
  */
 
-import { apiClient } from '../client'
+import { apiClient, buildApiUrl } from '../client'
+import { ADMIN_UI_REQUEST_HEADER } from '../adminUIRequest'
 import type {
   Account,
   CreateAccountRequest,
@@ -24,6 +25,133 @@ import type {
   UpstreamBillingProbeResult,
   UpstreamBillingProbeSettings
 } from '@/types'
+
+export type AccountStatusCheckMode = 'default' | 'compact'
+export type AccountStatusCheckCategory =
+  | 'normal'
+  | 'unauthorized'
+  | 'quota_exhausted'
+  | 'forbidden'
+  | 'other_error'
+
+export interface AccountStatusCheckRequest {
+  group_id: number
+  model_id: string
+  mode: AccountStatusCheckMode
+}
+
+export interface AccountStatusCheckStats {
+  total: number
+  completed: number
+  normal: number
+  unauthorized: number
+  quota_exhausted: number
+  forbidden: number
+  other_error: number
+}
+
+export interface AccountStatusCheckEvent {
+  type:
+    | 'batch_start'
+    | 'account_start'
+    | 'account_log'
+    | 'account_result'
+    | 'batch_progress'
+    | 'batch_complete'
+  group_id?: number
+  group_name?: string
+  model_id?: string
+  mode?: AccountStatusCheckMode
+  account_id?: number
+  account_name?: string
+  account_priority?: number
+  log_type?: string
+  text?: string
+  category?: AccountStatusCheckCategory
+  http_status?: number
+  error?: string
+  latency_ms?: number
+  consecutive_403?: number
+  threshold_403?: number
+  total?: number
+  completed?: number
+  canceled?: boolean
+  stats?: AccountStatusCheckStats
+}
+
+export async function runStatusCheck(
+  request: AccountStatusCheckRequest,
+  onEvent: (event: AccountStatusCheckEvent) => void,
+  signal?: AbortSignal
+): Promise<void> {
+  const headers: Record<string, string> = {
+    Accept: 'text/event-stream',
+    'Content-Type': 'application/json',
+    [ADMIN_UI_REQUEST_HEADER]: '1'
+  }
+  const token = localStorage.getItem('auth_token')
+  if (token) headers.Authorization = `Bearer ${token}`
+
+  const response = await fetch(buildApiUrl('/admin/accounts/status-check'), {
+    method: 'POST',
+    credentials: 'include',
+    headers,
+    body: JSON.stringify(request),
+    signal
+  })
+
+  if (!response.ok) {
+    let message = `HTTP ${response.status}`
+    try {
+      const payload = (await response.json()) as {
+        message?: string
+        detail?: string | { message?: string }
+        error?: string
+      }
+      if (payload.message) {
+        message = payload.message
+      } else if (typeof payload.detail === 'string') {
+        message = payload.detail
+      } else if (payload.detail?.message) {
+        message = payload.detail.message
+      } else if (payload.error) {
+        message = payload.error
+      }
+    } catch {
+      // Keep the status fallback for non-JSON proxy responses.
+    }
+    throw new Error(message)
+  }
+
+  const reader = response.body?.getReader()
+  if (!reader) throw new Error('No response body')
+
+  const decoder = new TextDecoder()
+  let buffer = ''
+
+  const processBlock = (block: string) => {
+    const data = block
+      .split(/\r?\n/)
+      .filter((line) => line.startsWith('data:'))
+      .map((line) => line.slice(5).trimStart())
+      .join('\n')
+      .trim()
+    if (!data) return
+    onEvent(JSON.parse(data) as AccountStatusCheckEvent)
+  }
+
+  while (true) {
+    const { done, value } = await reader.read()
+    if (done) break
+    buffer += decoder.decode(value, { stream: true })
+    const blocks = buffer.split(/\r?\n\r?\n/)
+    buffer = blocks.pop() ?? ''
+    for (const block of blocks) processBlock(block)
+  }
+
+  buffer += decoder.decode()
+  if (buffer.trim()) processBlock(buffer)
+}
 
 /**
  * List all accounts with pagination
@@ -883,6 +1011,7 @@ export async function probeUpstreamBillingBatch(accountIds: number[]): Promise<U
 }
 
 export const accountsAPI = {
+  runStatusCheck,
   list,
   listWithEtag,
   getById,

@@ -774,6 +774,9 @@ func (s *OpenAIGatewayService) Forward(ctx context.Context, c *gin.Context, acco
 			if headerGuard != nil {
 				headerGuard.close()
 			}
+			if failoverErr := s.handleAgentIdentityAuthenticationFailure(ctx, account, err, upstreamModel); failoverErr != nil {
+				return nil, failoverErr
+			}
 			return nil, err
 		}
 

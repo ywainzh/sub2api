@@ -24,6 +24,7 @@ import (
 	"github.com/Wei-Shaw/sub2api/internal/pkg/openai"
 	"github.com/Wei-Shaw/sub2api/internal/pkg/openai_compat"
 	"github.com/Wei-Shaw/sub2api/internal/pkg/xai"
+	"github.com/Wei-Shaw/sub2api/internal/util/logredact"
 	"github.com/Wei-Shaw/sub2api/internal/util/urlvalidator"
 	"github.com/gin-gonic/gin"
 	"github.com/google/uuid"
@@ -40,17 +41,38 @@ const (
 
 // TestEvent represents a SSE event for account testing
 type TestEvent struct {
-	Type     string `json:"type"`
-	Text     string `json:"text,omitempty"`
-	Model    string `json:"model,omitempty"`
-	Status   string `json:"status,omitempty"`
-	Code     string `json:"code,omitempty"`
-	ImageURL string `json:"image_url,omitempty"`
-	MimeType string `json:"mime_type,omitempty"`
-	Data     any    `json:"data,omitempty"`
-	Success  bool   `json:"success,omitempty"`
-	Error    string `json:"error,omitempty"`
+	Type                string `json:"type"`
+	Text                string `json:"text,omitempty"`
+	Model               string `json:"model,omitempty"`
+	Status              string `json:"status,omitempty"`
+	Code                string `json:"code,omitempty"`
+	ImageURL            string `json:"image_url,omitempty"`
+	MimeType            string `json:"mime_type,omitempty"`
+	Data                any    `json:"data,omitempty"`
+	Success             bool   `json:"success,omitempty"`
+	Error               string `json:"error,omitempty"`
+	HTTPStatus          int    `json:"http_status,omitempty"`
+	RawErrorBody        string `json:"-"`
+	AccountStateHandled bool   `json:"-"`
 }
+
+// AccountTestEventSink receives the same events emitted by the single-account
+// SSE endpoint. It is used by internal batch jobs without changing the public
+// streaming contract.
+type AccountTestEventSink func(TestEvent)
+
+// AccountTestRunResult is the structured result of an in-memory account test.
+// RawErrorBody is already redacted and bounded before it reaches this type.
+type AccountTestRunResult struct {
+	Success             bool
+	HTTPStatus          int
+	Error               string
+	RawErrorBody        string
+	LatencyMs           int64
+	AccountStateHandled bool
+}
+
+type accountTestEventSinkContextKey struct{}
 
 const (
 	defaultGeminiTextTestPrompt  = "hi"
@@ -75,6 +97,7 @@ type AccountTestService struct {
 	tlsFPProfileService       *TLSFingerprintProfileService
 	agentIdentityTaskMu       sync.Mutex
 	agentIdentityWS           agentIdentityWSConnectionInvalidator
+	agentIdentityAuthFailures agentIdentityAuthenticationFailureHandler
 }
 
 // NewAccountTestService creates a new AccountTestService
@@ -474,7 +497,7 @@ func (s *AccountTestService) testBedrockAccountConnection(c *gin.Context, ctx co
 	body, _ := io.ReadAll(resp.Body)
 
 	if resp.StatusCode != http.StatusOK {
-		return s.sendErrorAndEnd(c, fmt.Sprintf("API returned %d: %s", resp.StatusCode, string(body)))
+		return s.sendHTTPErrorAndEnd(c, resp.StatusCode, body, "API returned %d: %s")
 	}
 
 	// Bedrock non-streaming response is standard Claude JSON, extract the text
@@ -616,7 +639,7 @@ func (s *AccountTestService) testOpenAIAccountConnection(c *gin.Context, account
 	if credentialAccount.IsOpenAIAgentIdentity() {
 		authHeaders, authErr := buildAgentIdentityAuthenticationHeaders(ctx, s.accountRepo, s.agentIdentityWS, &s.agentIdentityTaskMu, credentialAccount)
 		if authErr != nil {
-			return s.sendErrorAndEnd(c, "Failed to build Agent Identity authentication")
+			return s.sendAgentIdentityAuthenticationErrorAndEnd(c, ctx, credentialAccount, testModelID, authErr)
 		}
 		for key, values := range authHeaders {
 			for _, value := range values {
@@ -684,7 +707,7 @@ func (s *AccountTestService) testOpenAIAccountConnection(c *gin.Context, account
 			errMsg := fmt.Sprintf("Authentication failed (401): %s", string(body))
 			_ = s.accountRepo.SetError(ctx, account.ID, errMsg)
 		}
-		return s.sendErrorAndEnd(c, fmt.Sprintf("API returned %d: %s", resp.StatusCode, string(body)))
+		return s.sendHTTPErrorAndEnd(c, resp.StatusCode, body, "API returned %d: %s")
 	}
 
 	// Process SSE stream
@@ -857,7 +880,7 @@ func (s *AccountTestService) testOpenAIChatCompletionsConnection(
 			errMsg := fmt.Sprintf("Chat Completions authentication failed (401): %s", string(body))
 			_ = s.accountRepo.SetError(ctx, account.ID, errMsg)
 		}
-		return s.sendErrorAndEnd(c, fmt.Sprintf("Chat Completions API (/v1/chat/completions) returned %d: %s", resp.StatusCode, string(body)))
+		return s.sendHTTPErrorAndEnd(c, resp.StatusCode, body, "Chat Completions API (/v1/chat/completions) returned %d: %s")
 	}
 
 	return s.processOpenAIChatCompletionsStream(c, resp.Body)
@@ -930,7 +953,7 @@ func (s *AccountTestService) testOpenAICompactConnection(c *gin.Context, account
 	if credentialAccount.IsOpenAIAgentIdentity() {
 		authHeaders, authErr := buildAgentIdentityAuthenticationHeaders(ctx, s.accountRepo, s.agentIdentityWS, &s.agentIdentityTaskMu, credentialAccount)
 		if authErr != nil {
-			return s.sendErrorAndEnd(c, "Failed to build Agent Identity authentication")
+			return s.sendAgentIdentityAuthenticationErrorAndEnd(c, ctx, credentialAccount, testModelID, authErr)
 		}
 		for key, values := range authHeaders {
 			for _, value := range values {
@@ -1000,7 +1023,7 @@ func (s *AccountTestService) testOpenAICompactConnection(c *gin.Context, account
 			errMsg := fmt.Sprintf("Authentication failed (401): %s", string(body))
 			_ = s.accountRepo.SetError(ctx, account.ID, errMsg)
 		}
-		return s.sendErrorAndEnd(c, fmt.Sprintf("API returned %d: %s", resp.StatusCode, string(body)))
+		return s.sendHTTPErrorAndEnd(c, resp.StatusCode, body, "API returned %d: %s")
 	}
 
 	s.sendEvent(c, TestEvent{Type: "content", Text: "Compact probe succeeded"})
@@ -1109,7 +1132,7 @@ func (s *AccountTestService) testGeminiAccountConnection(c *gin.Context, account
 
 	if resp.StatusCode != http.StatusOK {
 		body, _ := io.ReadAll(resp.Body)
-		return s.sendErrorAndEnd(c, fmt.Sprintf("API returned %d: %s", resp.StatusCode, string(body)))
+		return s.sendHTTPErrorAndEnd(c, resp.StatusCode, body, "API returned %d: %s")
 	}
 
 	// Process SSE stream
@@ -1733,7 +1756,7 @@ func (s *AccountTestService) testOpenAIImageAPIKey(c *gin.Context, ctx context.C
 	}
 
 	if resp.StatusCode != http.StatusOK {
-		return s.sendErrorAndEnd(c, fmt.Sprintf("API returned %d: %s", resp.StatusCode, string(body)))
+		return s.sendHTTPErrorAndEnd(c, resp.StatusCode, body, "API returned %d: %s")
 	}
 
 	// Parse {"data": [{"b64_json": "...", "revised_prompt": "..."}]}
@@ -1817,7 +1840,7 @@ func (s *AccountTestService) testOpenAIImageOAuth(c *gin.Context, ctx context.Co
 	if credentialAccount.IsOpenAIAgentIdentity() {
 		authHeaders, authErr := buildAgentIdentityAuthenticationHeaders(ctx, s.accountRepo, s.agentIdentityWS, &s.agentIdentityTaskMu, credentialAccount)
 		if authErr != nil {
-			return s.sendErrorAndEnd(c, "Failed to build Agent Identity authentication")
+			return s.sendAgentIdentityAuthenticationErrorAndEnd(c, ctx, credentialAccount, modelID, authErr)
 		}
 		for key, values := range authHeaders {
 			for _, value := range values {
@@ -1856,11 +1879,7 @@ func (s *AccountTestService) testOpenAIImageOAuth(c *gin.Context, ctx context.Co
 	if resp.StatusCode >= 400 {
 		body, _ := io.ReadAll(io.LimitReader(resp.Body, 2<<20))
 		body = redactAgentIdentitySensitiveBodyForAccount(ctx, s.accountRepo, credentialAccount, body)
-		message := strings.TrimSpace(extractUpstreamErrorMessage(body))
-		if message == "" {
-			message = fmt.Sprintf("Responses API returned %d", resp.StatusCode)
-		}
-		return s.sendErrorAndEnd(c, message)
+		return s.sendHTTPErrorAndEnd(c, resp.StatusCode, body, "Responses API returned %d: %s")
 	}
 
 	body, err := io.ReadAll(resp.Body)
@@ -1894,6 +1913,11 @@ func (s *AccountTestService) testOpenAIImageOAuth(c *gin.Context, ctx context.Co
 }
 
 func (s *AccountTestService) sendEvent(c *gin.Context, event TestEvent) {
+	if c != nil && c.Request != nil {
+		if sink, ok := c.Request.Context().Value(accountTestEventSinkContextKey{}).(AccountTestEventSink); ok && sink != nil {
+			sink(event)
+		}
+	}
 	eventJSON, _ := json.Marshal(event)
 	if _, err := fmt.Fprintf(c.Writer, "data: %s\n\n", eventJSON); err != nil {
 		log.Printf("failed to write SSE event: %v", err)
@@ -1903,10 +1927,144 @@ func (s *AccountTestService) sendEvent(c *gin.Context, event TestEvent) {
 }
 
 // sendErrorAndEnd sends an error event and ends the stream
-func (s *AccountTestService) sendErrorAndEnd(c *gin.Context, errorMsg string) error {
+func (s *AccountTestService) sendErrorAndEnd(c *gin.Context, errorMsg string, statusCode ...int) error {
 	log.Printf("Account test error: %s", errorMsg)
-	s.sendEvent(c, TestEvent{Type: "error", Error: errorMsg})
+	event := TestEvent{Type: "error", Error: errorMsg}
+	if len(statusCode) > 0 {
+		event.HTTPStatus = statusCode[0]
+	}
+	s.sendEvent(c, event)
 	return fmt.Errorf("%s", errorMsg)
+}
+
+// sendHTTPErrorAndEnd emits an error with a structured upstream status. The
+// body is redacted and bounded before it is sent to the browser or an internal
+// batch observer; credentials must never appear in account-test output.
+func (s *AccountTestService) sendHTTPErrorAndEnd(c *gin.Context, statusCode int, body []byte, format string) error {
+	safeBody := redactAccountTestErrorBody(body)
+	message := fmt.Sprintf(format, statusCode, safeBody)
+	log.Printf("Account test error: %s", message)
+	s.sendEvent(c, TestEvent{
+		Type:         "error",
+		Error:        message,
+		HTTPStatus:   statusCode,
+		RawErrorBody: string(safeBody),
+	})
+	return fmt.Errorf("%s", message)
+}
+
+func (s *AccountTestService) sendAgentIdentityAuthenticationErrorAndEnd(
+	c *gin.Context,
+	ctx context.Context,
+	account *Account,
+	modelID string,
+	authErr error,
+) error {
+	statusCode := 0
+	stateHandled := false
+	var registrationErr *AgentIdentityRegistrationError
+	var credentialErr *agentIdentityCredentialError
+	if s.agentIdentityAuthFailures != nil {
+		if failoverErr := s.agentIdentityAuthFailures.handleAgentIdentityAuthenticationFailure(ctx, account, authErr, modelID); failoverErr != nil {
+			statusCode = failoverErr.StatusCode
+			stateHandled = true
+		}
+	}
+	if statusCode == 0 {
+		switch {
+		case errors.As(authErr, &registrationErr) && registrationErr.StatusCode > 0:
+			statusCode = registrationErr.StatusCode
+		case errors.As(authErr, &credentialErr):
+			statusCode = http.StatusUnauthorized
+		default:
+			statusCode = http.StatusBadGateway
+		}
+	}
+
+	var safeBody []byte
+	if errors.As(authErr, &registrationErr) && len(registrationErr.ResponseBody) > 0 {
+		safeBody = redactAccountTestErrorBody(registrationErr.ResponseBody)
+	}
+	message := fmt.Sprintf("Agent Identity authentication failed (status %d)", statusCode)
+	if len(safeBody) > 0 {
+		switch statusCode {
+		case http.StatusForbidden:
+			message = fmt.Sprintf("Access forbidden (403): %s", safeBody)
+		case http.StatusTooManyRequests:
+			message = fmt.Sprintf("API returned 429: %s", safeBody)
+		case http.StatusUnauthorized:
+			message = fmt.Sprintf("Authentication failed (401): %s", safeBody)
+		default:
+			message = fmt.Sprintf("Agent Identity authentication failed (status %d): %s", statusCode, safeBody)
+		}
+	}
+	log.Printf("Account test error: %s", message)
+	s.sendEvent(c, TestEvent{
+		Type:                "error",
+		Error:               message,
+		HTTPStatus:          statusCode,
+		RawErrorBody:        string(safeBody),
+		AccountStateHandled: stateHandled,
+	})
+	return errors.New(message)
+}
+
+func redactAccountTestErrorBody(body []byte) []byte {
+	redacted := logredact.RedactText(string(body))
+	redacted = sanitizeUpstreamErrorMessage(redacted)
+	if strings.TrimSpace(redacted) == "" {
+		return nil
+	}
+	// Keep enough of the upstream response for quota/forbidden diagnostics,
+	// while bounding a pathological HTML or proxy response.
+	return []byte(truncateForLog([]byte(redacted), 4096))
+}
+
+// RunAccountTest runs the existing account test against an in-memory SSE
+// writer and forwards its structured events to sink. It is intentionally
+// separate from RunTestBackground so batch status checks do not create
+// scheduled-test records or invoke recovery twice.
+func (s *AccountTestService) RunAccountTest(
+	ctx context.Context,
+	accountID int64,
+	modelID string,
+	mode string,
+	sink AccountTestEventSink,
+) AccountTestRunResult {
+	startedAt := time.Now()
+	var lastError TestEvent
+	var completed bool
+
+	observer := func(event TestEvent) {
+		if event.Type == "error" {
+			lastError = event
+		}
+		if event.Type == "test_complete" && event.Success {
+			completed = true
+		}
+		if sink != nil {
+			sink(event)
+		}
+	}
+
+	w := httptest.NewRecorder()
+	ginCtx, _ := gin.CreateTestContext(w)
+	ginCtx.Request = (&http.Request{}).WithContext(context.WithValue(ctx, accountTestEventSinkContextKey{}, AccountTestEventSink(observer)))
+	testErr := s.TestAccountConnection(ginCtx, accountID, modelID, "", mode)
+
+	result := AccountTestRunResult{
+		Success:             testErr == nil && completed && lastError.Type == "",
+		LatencyMs:           time.Since(startedAt).Milliseconds(),
+		HTTPStatus:          lastError.HTTPStatus,
+		AccountStateHandled: lastError.AccountStateHandled,
+	}
+	if lastError.Error != "" {
+		result.Error = lastError.Error
+		result.RawErrorBody = lastError.RawErrorBody
+	} else if testErr != nil {
+		result.Error = testErr.Error()
+	}
+	return result
 }
 
 // RunTestBackground executes an account test in-memory (no real HTTP client),

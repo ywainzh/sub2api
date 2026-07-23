@@ -46,6 +46,8 @@
                   'sidebar-link-collapsed': sidebarCollapsed
                 }"
                 :title="sidebarCollapsed ? item.label : undefined"
+                :id="item.path === '/admin/accounts' ? 'sidebar-channel-manage' : undefined"
+                :aria-expanded="!sidebarCollapsed && isGroupExpanded(item)"
                 @click="handleGroupClick(item)"
               >
                 <component :is="item.icon" class="h-5 w-5 flex-shrink-0" />
@@ -768,7 +770,15 @@ const adminNavItems = computed((): NavItem[] => {
       ],
     },
     { path: '/admin/subscriptions', label: t('nav.subscriptions'), icon: CreditCardIcon, hideInSimpleMode: true },
-    { path: '/admin/accounts', label: t('nav.accounts'), icon: GlobeIcon },
+    {
+      path: '/admin/accounts',
+      label: t('nav.accounts'),
+      icon: GlobeIcon,
+      children: [
+        { path: '/admin/accounts', label: t('nav.accountList'), icon: GlobeIcon },
+        { path: '/admin/accounts/status-check', label: t('nav.accountStatusCheck'), icon: ChartIcon },
+      ],
+    },
     { path: '/admin/announcements', label: t('nav.announcements'), icon: BellIcon },
     { path: '/admin/proxies', label: t('nav.proxies'), icon: ServerIcon },
     {
@@ -898,7 +908,12 @@ function toggleGroup(item: NavItem) {
  *   (router-link semantics) and ensure the group is expanded.
  */
 function handleGroupClick(item: NavItem) {
-  if (sidebarCollapsed.value) return
+  if (sidebarCollapsed.value) {
+    if (!item.expandOnly && route.path !== item.path) {
+      router.push(item.path)
+    }
+    return
+  }
   if (item.expandOnly) {
     toggleGroup(item)
     return

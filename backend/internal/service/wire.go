@@ -192,6 +192,7 @@ func ProvideAccountTestService(
 		tlsFPProfileService,
 	)
 	service.agentIdentityWS = openAIGatewayService
+	service.agentIdentityAuthFailures = openAIGatewayService
 	return service
 }
 
@@ -724,6 +725,7 @@ var ProviderSet = wire.NewSet(
 	ProvideRateLimitService,
 	ProvideAccountUsageService,
 	ProvideAccountTestService,
+	NewAccountStatusCheckService,
 	ProvideUpstreamBillingProbeService,
 	ProvideSettingService,
 	NewDataManagementService,

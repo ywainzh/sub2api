@@ -17,6 +17,9 @@ import (
 	"time"
 
 	"github.com/Wei-Shaw/sub2api/internal/pkg/httpclient"
+	"github.com/Wei-Shaw/sub2api/internal/pkg/logger"
+	"github.com/Wei-Shaw/sub2api/internal/util/logredact"
+	"go.uber.org/zap"
 	"golang.org/x/crypto/curve25519"
 	"golang.org/x/crypto/nacl/box"
 )
@@ -25,6 +28,7 @@ const (
 	OpenAIAuthModeAgentIdentity          = "agentIdentity"
 	agentIdentityAuthAPIBaseURL          = "https://auth.openai.com/api/accounts"
 	agentIdentityTaskRegistrationTimeout = 30 * time.Second
+	agentIdentityRegistrationBodyLimit   = 8 * 1024
 )
 
 var openAIAgentIdentityAuthAPIBaseURL = agentIdentityAuthAPIBaseURL
@@ -34,6 +38,12 @@ var agentIdentityTaskLocks sync.Map // map[int64]*sync.Mutex
 type agentIdentityWSConnectionInvalidator interface {
 	InvalidateAgentIdentityWSConnections(accountID int64)
 }
+
+type agentIdentityAuthenticationFailureHandler interface {
+	handleAgentIdentityAuthenticationFailure(ctx context.Context, account *Account, err error, canonicalModel ...string) *UpstreamFailoverError
+}
+
+type agentIdentityRegistrationStateContextKey struct{}
 
 type agentIdentityKey struct {
 	runtimeID  string
@@ -46,6 +56,45 @@ type agentIdentityTaskRegistrationResponse struct {
 	TaskIDCamel          string `json:"taskId"`
 	EncryptedTaskID      string `json:"encrypted_task_id"`
 	EncryptedTaskIDCamel string `json:"encryptedTaskId"`
+}
+
+// AgentIdentityRegistrationError preserves the bounded upstream response
+// needed for account-state classification without exposing it through Error.
+// StatusCode is zero for a transport-level failure.
+type AgentIdentityRegistrationError struct {
+	StatusCode      int
+	ResponseHeaders http.Header
+	ResponseBody    []byte
+	cause           error
+}
+
+func (e *AgentIdentityRegistrationError) Error() string {
+	if e == nil || e.StatusCode == 0 {
+		return "agent identity task registration request failed"
+	}
+	return fmt.Sprintf("agent task registration returned status %d", e.StatusCode)
+}
+
+func (e *AgentIdentityRegistrationError) Unwrap() error {
+	if e == nil {
+		return nil
+	}
+	return e.cause
+}
+
+type agentIdentityCredentialError struct {
+	cause error
+}
+
+func (e *agentIdentityCredentialError) Error() string {
+	return "agent identity credentials are invalid"
+}
+
+func (e *agentIdentityCredentialError) Unwrap() error {
+	if e == nil {
+		return nil
+	}
+	return e.cause
 }
 
 type agentIdentityTaskRecoveredError struct{}
@@ -175,7 +224,7 @@ func decryptAgentTaskID(key agentIdentityKey, encoded string) (string, error) {
 func registerAgentIdentityTask(ctx context.Context, account *Account) (string, error) {
 	key, err := agentIdentityKeyFromAccount(account)
 	if err != nil {
-		return "", err
+		return "", &agentIdentityCredentialError{cause: err}
 	}
 	timestamp, signature, err := signAgentTaskRegistration(key, time.Now())
 	if err != nil {
@@ -209,11 +258,23 @@ func registerAgentIdentityTask(ctx context.Context, account *Account) (string, e
 	req.Header.Set("Accept", "application/json")
 	resp, err := client.Do(req)
 	if err != nil {
-		return "", errors.New("agent task registration request failed")
+		return "", &AgentIdentityRegistrationError{cause: err}
 	}
 	defer func() { _ = resp.Body.Close() }()
 	if resp.StatusCode < http.StatusOK || resp.StatusCode >= http.StatusMultipleChoices {
-		return "", fmt.Errorf("agent task registration returned status %d", resp.StatusCode)
+		body, readErr := io.ReadAll(io.LimitReader(resp.Body, agentIdentityRegistrationBodyLimit+1))
+		if len(body) > agentIdentityRegistrationBodyLimit {
+			body = body[:agentIdentityRegistrationBodyLimit]
+		}
+		registrationErr := &AgentIdentityRegistrationError{
+			StatusCode:      resp.StatusCode,
+			ResponseHeaders: resp.Header.Clone(),
+			ResponseBody:    append([]byte(nil), body...),
+		}
+		if readErr != nil {
+			registrationErr.cause = readErr
+		}
+		return "", registrationErr
 	}
 	var result agentIdentityTaskRegistrationResponse
 	if err := json.NewDecoder(io.LimitReader(resp.Body, 64*1024)).Decode(&result); err != nil {
@@ -401,15 +462,152 @@ func buildAgentIdentityAuthenticationHeaders(ctx context.Context, repo AccountRe
 	}
 	key, err := agentIdentityKeyFromAccount(account)
 	if err != nil {
-		return nil, err
+		return nil, &agentIdentityCredentialError{cause: err}
 	}
 	assertion, err := buildAgentAssertion(key, time.Now())
 	if err != nil {
-		return nil, err
+		return nil, &agentIdentityCredentialError{cause: err}
 	}
 	headers := make(http.Header)
 	headers.Set("Authorization", assertion)
 	return headers, nil
+}
+
+const (
+	agentIdentityRegistrationFailureReason GatewayFailureReason = "agent_identity_registration"
+	agentIdentityCredentialFailureReason   GatewayFailureReason = "agent_identity_credentials"
+)
+
+// handleAgentIdentityAuthenticationFailure applies account state changes and
+// returns a failover error for account-scoped authentication failures. The
+// response body is retained only in the typed registration error; state
+// handling receives a redacted copy and logs status metadata only.
+func (s *OpenAIGatewayService) handleAgentIdentityAuthenticationFailure(
+	ctx context.Context,
+	account *Account,
+	err error,
+	canonicalModel ...string,
+) *UpstreamFailoverError {
+	if s == nil || account == nil {
+		return nil
+	}
+	stateAccount := account
+	if account.IsShadow() {
+		resolved, resolveErr := resolveCredentialAccount(ctx, s.accountRepo, account)
+		if resolveErr != nil || resolved == nil {
+			return nil
+		}
+		stateAccount = resolved
+	}
+	if !stateAccount.IsOpenAIAgentIdentity() {
+		return nil
+	}
+
+	var registrationErr *AgentIdentityRegistrationError
+	var credentialErr *agentIdentityCredentialError
+	statusCode := http.StatusBadGateway
+	reason := agentIdentityRegistrationFailureReason
+	responseHeaders := http.Header{}
+	responseBody := []byte(nil)
+
+	switch {
+	case errors.As(err, &registrationErr):
+		statusCode = registrationErr.StatusCode
+		if statusCode == 0 {
+			statusCode = http.StatusBadGateway
+		}
+		responseHeaders = registrationErr.ResponseHeaders.Clone()
+		responseBody = redactAgentIdentitySensitiveBodyForAccount(ctx, s.accountRepo, stateAccount, registrationErr.ResponseBody)
+		responseBody = []byte(logredact.RedactText(string(responseBody)))
+		if registrationErr.StatusCode == http.StatusForbidden || registrationErr.StatusCode == http.StatusTooManyRequests {
+			// The existing OpenAI policy owns 403 strike counting and 429 reset
+			// handling. Registration failures always fail over after state update.
+			if s.rateLimitService != nil {
+				model := canonicalModel
+				stateBase := ctx
+				if stateBase == nil {
+					stateBase = context.Background()
+				}
+				stateCtx := context.WithValue(stateBase, agentIdentityRegistrationStateContextKey{}, true)
+				_ = s.handleOpenAIAccountUpstreamError(stateCtx, stateAccount, registrationErr.StatusCode, responseHeaders, responseBody, model...)
+			}
+		} else if registrationErr.StatusCode >= http.StatusInternalServerError || registrationErr.StatusCode == 0 {
+			s.temporarilyUnscheduleAgentIdentityAccount(ctx, stateAccount, registrationErr.StatusCode)
+		} else {
+			s.permanentlyDisableAgentIdentityAccount(ctx, stateAccount, registrationErr.StatusCode)
+		}
+	case errors.As(err, &credentialErr):
+		statusCode = http.StatusUnauthorized
+		reason = agentIdentityCredentialFailureReason
+		s.permanentlyDisableAgentIdentityAccount(ctx, stateAccount, statusCode)
+	default:
+		return nil
+	}
+
+	fields := []zap.Field{
+		zap.Int64("account_id", stateAccount.ID),
+		zap.Int("status_code", statusCode),
+		zap.String("stage", string(GatewayFailureStageAccountAuth)),
+		zap.String("scope", string(GatewayFailureScopeAccount)),
+		zap.String("reason", string(reason)),
+		zap.String("account_status", stateAccount.Status),
+		zap.Bool("schedulable", stateAccount.Schedulable),
+		zap.String("next_account_action", "retry"),
+	}
+	if stateAccount.ID != account.ID {
+		fields = append(fields, zap.Int64("selected_account_id", account.ID))
+	}
+	if stateAccount.TempUnschedulableUntil != nil {
+		fields = append(fields, zap.Time("next_retry_at", *stateAccount.TempUnschedulableUntil))
+	}
+	if stateAccount.RateLimitResetAt != nil {
+		fields = append(fields, zap.Time("rate_limit_reset_at", *stateAccount.RateLimitResetAt))
+	}
+	logger.L().With(fields...).Warn("openai.agent_identity_authentication_failed")
+
+	return &UpstreamFailoverError{
+		StatusCode:        statusCode,
+		ResponseHeaders:   responseHeaders,
+		Stage:             GatewayFailureStageAccountAuth,
+		Scope:             GatewayFailureScopeAccount,
+		Reason:            reason,
+		NextAccountAction: NextAccountRetry,
+	}
+}
+
+func (s *OpenAIGatewayService) permanentlyDisableAgentIdentityAccount(ctx context.Context, account *Account, statusCode int) {
+	if s == nil || account == nil {
+		return
+	}
+	reason := fmt.Sprintf("Agent Identity authentication failed (%d): invalid local credentials", statusCode)
+	stateCtx, cancel := openAIAccountStateContext(ctx)
+	defer cancel()
+	s.BlockAccountScheduling(account, time.Time{}, "agent_identity_auth_error")
+	if s.rateLimitService != nil {
+		s.rateLimitService.handleAuthError(stateCtx, account, reason)
+		return
+	}
+	if s.accountRepo != nil {
+		if err := s.accountRepo.SetError(stateCtx, account.ID, reason); err != nil {
+			logger.L().With(zap.Int64("account_id", account.ID)).Warn("openai.agent_identity_set_error_failed", zap.Error(err))
+		}
+	}
+}
+
+func (s *OpenAIGatewayService) temporarilyUnscheduleAgentIdentityAccount(ctx context.Context, account *Account, statusCode int) {
+	if s == nil || account == nil {
+		return
+	}
+	until := time.Now().Add(openAITransportErrorTempUnschedDuration)
+	reason := fmt.Sprintf("Agent Identity registration temporarily failed (%d)", statusCode)
+	s.BlockAccountScheduling(account, until, "agent_identity_registration")
+	stateCtx, cancel := openAIAccountStateContext(ctx)
+	defer cancel()
+	if s.accountRepo != nil {
+		if err := s.accountRepo.SetTempUnschedulable(stateCtx, account.ID, until, reason); err != nil {
+			logger.L().With(zap.Int64("account_id", account.ID), zap.Int("status_code", statusCode)).Warn("openai.agent_identity_set_temp_unschedulable_failed", zap.Error(err))
+		}
+	}
 }
 
 func (s *OpenAIGatewayService) refreshOpenAIAgentIdentityHeaders(ctx context.Context, account *Account, headers http.Header) (http.Header, error) {

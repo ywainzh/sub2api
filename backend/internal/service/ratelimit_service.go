@@ -360,17 +360,23 @@ func (s *RateLimitService) HandleUpstreamError(ctx context.Context, account *Acc
 		s.handleAuthError(ctx, account, msg)
 		shouldDisable = true
 	case 403:
-		logger.LegacyPrintf(
-			"service.ratelimit",
-			"[HandleUpstreamErrorRaw] account_id=%d platform=%s type=%s status=403 request_id=%s cf_ray=%s upstream_msg=%s raw_body=%s",
-			account.ID,
-			account.Platform,
-			account.Type,
-			strings.TrimSpace(headers.Get("x-request-id")),
-			strings.TrimSpace(headers.Get("cf-ray")),
-			upstreamMsg,
-			truncateForLog(responseBody, 1024),
-		)
+		suppressed := false
+		if ctx != nil {
+			suppressed, _ = ctx.Value(agentIdentityRegistrationStateContextKey{}).(bool)
+		}
+		if !suppressed {
+			logger.LegacyPrintf(
+				"service.ratelimit",
+				"[HandleUpstreamErrorRaw] account_id=%d platform=%s type=%s status=403 request_id=%s cf_ray=%s upstream_msg=%s raw_body=%s",
+				account.ID,
+				account.Platform,
+				account.Type,
+				strings.TrimSpace(headers.Get("x-request-id")),
+				strings.TrimSpace(headers.Get("cf-ray")),
+				upstreamMsg,
+				truncateForLog(responseBody, 1024),
+			)
+		}
 		shouldDisable = s.handle403(ctx, account, upstreamMsg, responseBody)
 	case 429:
 		s.handle429(ctx, account, headers, responseBody)
@@ -822,30 +828,67 @@ func (s *RateLimitService) handle403(ctx context.Context, account *Account, upst
 	return true
 }
 
+// OpenAI403TestResult contains the structured side effect of a manual status
+// check. Gateway traffic only needs the boolean returned by handleOpenAI403,
+// while the admin batch UI also displays the consecutive counter.
+type OpenAI403TestResult struct {
+	Message   string
+	Count     int64
+	Threshold int
+	Disabled  bool
+}
+
+// HandleOpenAI403ForAccountTest applies the same OpenAI 403 cooldown/disable
+// rules used by gateway traffic and returns the resulting counter. Batch checks
+// call this once per upstream response so consecutive_403 cannot be doubled.
+func (s *RateLimitService) HandleOpenAI403ForAccountTest(ctx context.Context, account *Account, responseBody []byte) OpenAI403TestResult {
+	upstreamMsg := strings.TrimSpace(extractUpstreamErrorMessage(responseBody))
+	upstreamMsg = sanitizeUpstreamErrorMessage(upstreamMsg)
+	if upstreamMsg != "" {
+		upstreamMsg = truncateForLog([]byte(upstreamMsg), 4096)
+	}
+	return s.applyOpenAI403(ctx, account, upstreamMsg, responseBody, true)
+}
+
 func (s *RateLimitService) handleOpenAI403(ctx context.Context, account *Account, upstreamMsg string, responseBody []byte) (shouldDisable bool) {
+	_ = s.applyOpenAI403(ctx, account, upstreamMsg, responseBody, false)
+	return true
+}
+
+func (s *RateLimitService) applyOpenAI403(ctx context.Context, account *Account, upstreamMsg string, responseBody []byte, includeCounterInMessage bool) OpenAI403TestResult {
 	msg := buildForbiddenErrorMessage(
 		"Access forbidden (403):",
 		upstreamMsg,
 		responseBody,
 		"account may be suspended or lack permissions",
 	)
+	result := OpenAI403TestResult{
+		Message:   msg,
+		Threshold: openAI403DisableThreshold,
+		Disabled:  true,
+	}
 
 	if s.openAI403CounterCache == nil {
 		s.handleAuthError(ctx, account, msg)
-		return true
+		return result
 	}
 
 	count, err := s.openAI403CounterCache.IncrementOpenAI403Count(ctx, account.ID, openAI403CounterWindowMinutes)
 	if err != nil {
 		slog.Warn("openai_403_increment_failed", "account_id", account.ID, "error", err)
 		s.handleAuthError(ctx, account, msg)
-		return true
+		return result
+	}
+	result.Count = count
+	if includeCounterInMessage {
+		result.Message = fmt.Sprintf("%s | consecutive_403=%d/%d", msg, count, openAI403DisableThreshold)
 	}
 
 	if count >= openAI403DisableThreshold {
 		msg = fmt.Sprintf("%s | consecutive_403=%d/%d", msg, count, openAI403DisableThreshold)
 		s.handleAuthError(ctx, account, msg)
-		return true
+		result.Message = msg
+		return result
 	}
 
 	until := time.Now().Add(time.Duration(openAI403CooldownMinutesDefault) * time.Minute)
@@ -854,7 +897,7 @@ func (s *RateLimitService) handleOpenAI403(ctx context.Context, account *Account
 	if err := s.accountRepo.SetTempUnschedulable(ctx, account.ID, until, reason); err != nil {
 		slog.Warn("openai_403_set_temp_unschedulable_failed", "account_id", account.ID, "error", err)
 		s.handleAuthError(ctx, account, msg)
-		return true
+		return result
 	}
 
 	slog.Warn(
@@ -864,7 +907,7 @@ func (s *RateLimitService) handleOpenAI403(ctx context.Context, account *Account
 		"count", count,
 		"threshold", openAI403DisableThreshold,
 	)
-	return true
+	return result
 }
 
 // handleAntigravity403 处理 Antigravity 平台的 403 错误
