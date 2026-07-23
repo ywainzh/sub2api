@@ -88,8 +88,10 @@ type UpdateInfo struct {
 	ReleaseInfo    *ReleaseInfo `json:"release_info,omitempty"`
 	Cached         bool         `json:"cached"`
 	Warning        string       `json:"warning,omitempty"`
-	BuildType      string       `json:"build_type"` // "source" or "release"
-	DeploymentMode string       `json:"deployment_mode"` // "docker" or "binary"
+	// BuildType is "source" for manual builds and "release" for CI builds.
+	BuildType string `json:"build_type"`
+	// DeploymentMode is "docker" for container deployments and "binary" otherwise.
+	DeploymentMode string `json:"deployment_mode"`
 }
 
 // ReleaseInfo contains GitHub release details

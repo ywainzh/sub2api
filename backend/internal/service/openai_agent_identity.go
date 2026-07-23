@@ -505,7 +505,7 @@ func (s *OpenAIGatewayService) handleAgentIdentityAuthenticationFailure(
 
 	var registrationErr *AgentIdentityRegistrationError
 	var credentialErr *agentIdentityCredentialError
-	statusCode := http.StatusBadGateway
+	var statusCode int
 	reason := agentIdentityRegistrationFailureReason
 	responseHeaders := http.Header{}
 	responseBody := []byte(nil)
