@@ -153,7 +153,7 @@ func TestUpdateServiceRejectsNonSemverDockerRelease(t *testing.T) {
 	t.Setenv("SUB2API_DEPLOY_DIR", "/opt/sub2api")
 	svc := NewUpdateService(
 		&updateServiceCacheStub{},
-		&updateServiceGitHubClientStub{release: &GitHubRelease{TagName: "v0.1.2-rc.1"}},
+		&updateServiceGitHubClientStub{release: &GitHubRelease{TagName: "v9.9.9-rc.1"}},
 		"0.1.1",
 		"release",
 	)
