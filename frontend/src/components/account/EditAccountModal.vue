@@ -13,7 +13,7 @@
     >
       <div>
         <label class="input-label">{{ t('common.name') }}</label>
-        <input v-model="form.name" type="text" required class="input" data-tour="edit-account-form-name" />
+        <input v-model="form.name" type="text" required class="input" />
       </div>
       <div>
         <label class="input-label">{{ t('admin.accounts.notes') }}</label>
@@ -1435,7 +1435,6 @@
             type="number"
             min="1"
             class="input"
-            data-tour="account-form-priority"
           />
           <p class="input-hint">{{ t('admin.accounts.priorityHint') }}</p>
         </div>
@@ -2528,7 +2527,6 @@
         :groups="groups"
         :platform="account?.platform"
         :mixed-scheduling="mixedScheduling"
-        data-tour="account-form-groups"
       />
 
     </form>
@@ -2543,7 +2541,6 @@
           form="edit-account-form"
           :disabled="submitting"
           class="btn btn-primary"
-          data-tour="account-form-submit"
         >
           <svg
             v-if="submitting"

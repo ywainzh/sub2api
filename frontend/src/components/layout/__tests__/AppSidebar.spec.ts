@@ -65,10 +65,12 @@ describe('single-user navigation', () => {
     expect(componentSource).not.toContain("{ path: '/admin/users'")
     expect(componentSource).not.toContain("{ path: '/admin/announcements'")
     expect(componentSource).not.toContain("{ path: '/admin/promo-codes'")
+    expect(componentSource).not.toContain("{ path: '/admin/redeem'")
 
     expect(routerSource).not.toContain("path: '/admin/users'")
     expect(routerSource).not.toContain("path: '/admin/announcements'")
     expect(routerSource).not.toContain("path: '/admin/promo-codes'")
+    expect(routerSource).not.toContain("name: 'AdminRedeem'")
   })
 
   it('keeps only the admin usage entry for administrators', () => {
@@ -79,6 +81,19 @@ describe('single-user navigation', () => {
   it('removes personal subscription and redeem entries', () => {
     expect(componentSource).not.toContain("{ path: '/subscriptions'")
     expect(componentSource).not.toContain("{ path: '/redeem'")
+  })
+
+  it('removes channel and subscription management pages', () => {
+    expect(componentSource).not.toContain("{ path: '/available-channels'")
+    expect(componentSource).not.toContain("{ path: '/monitor'")
+    expect(componentSource).not.toContain("path: '/admin/channels'")
+    expect(componentSource).not.toContain("{ path: '/admin/subscriptions'")
+
+    expect(routerSource).not.toContain("name: 'UserAvailableChannels'")
+    expect(routerSource).not.toContain("name: 'ChannelStatus'")
+    expect(routerSource).not.toContain("name: 'AdminChannels'")
+    expect(routerSource).not.toContain("name: 'AdminChannelMonitor'")
+    expect(routerSource).not.toContain("name: 'AdminSubscriptions'")
   })
 
   it('disables announcement and subscription chrome', () => {
