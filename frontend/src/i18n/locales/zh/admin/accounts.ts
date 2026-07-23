@@ -57,7 +57,8 @@ export default {
           batchComplete: '检测完成：{completed}/{total}',
           batchStopped: '检测任务已取消。',
           stopRequested: '已请求停止，正在取消未完成账号...',
-          requestError: '检测请求失败：{error}'
+          requestError: '检测请求失败：{error}',
+          response: '测试返回'
         }
       },
       createAccount: '添加账号',

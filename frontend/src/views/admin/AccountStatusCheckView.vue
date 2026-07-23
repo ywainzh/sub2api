@@ -75,7 +75,6 @@
                 :empty-text="t('admin.accounts.statusCheck.noGroups')"
                 :aria-label="t('admin.accounts.statusCheck.groupLabel')"
               />
-              <p class="input-hint">{{ t('admin.accounts.statusCheck.groupHint') }}</p>
             </div>
 
             <div>
@@ -93,13 +92,28 @@
                 :creatable-prefix="t('admin.accounts.statusCheck.useCustomModel')"
                 :aria-label="t('admin.accounts.statusCheck.modelLabel')"
               />
-              <p class="input-hint">{{ t('admin.accounts.statusCheck.modelHint') }}</p>
             </div>
 
             <div>
-              <label for="status-check-mode" class="input-label">
-                {{ t('admin.accounts.statusCheck.modeLabel') }}
-              </label>
+              <div class="flex items-center">
+                <label for="status-check-mode" class="input-label mb-0">
+                  {{ t('admin.accounts.statusCheck.modeLabel') }}
+                </label>
+                <HelpTooltip
+                  :content="t('admin.accounts.statusCheck.modeHint')"
+                  width-class="w-72 max-w-[calc(100vw-2rem)]"
+                >
+                  <template #trigger>
+                    <span
+                      class="inline-flex h-4 w-4 cursor-help items-center justify-center rounded-full border border-gray-400 text-[10px] font-semibold leading-none text-gray-500 transition-colors hover:border-primary-500 hover:text-primary-600 dark:border-gray-500 dark:text-gray-400 dark:hover:border-primary-400 dark:hover:text-primary-300"
+                      role="img"
+                      :aria-label="t('admin.accounts.statusCheck.modeHint')"
+                    >
+                      ?
+                    </span>
+                  </template>
+                </HelpTooltip>
+              </div>
               <Select
                 id="status-check-mode"
                 v-model="selectedMode"
@@ -108,14 +122,10 @@
                 :searchable="false"
                 :aria-label="t('admin.accounts.statusCheck.modeLabel')"
               />
-              <p class="input-hint">{{ t('admin.accounts.statusCheck.modeHint') }}</p>
             </div>
           </div>
 
-          <div class="flex flex-col gap-3 border-t border-gray-100 pt-5 dark:border-dark-700 sm:flex-row sm:items-center sm:justify-between">
-            <div class="text-sm text-gray-500 dark:text-gray-400">
-              {{ t('admin.accounts.statusCheck.workerHint', { count: 5 }) }}
-            </div>
+          <div class="flex flex-col gap-3 border-t border-gray-100 pt-5 dark:border-dark-700 sm:flex-row sm:items-center sm:justify-end">
             <div class="flex flex-wrap gap-3">
               <button
                 v-if="running"
@@ -245,6 +255,7 @@ import { computed, defineComponent, h, nextTick, onBeforeUnmount, onMounted, ref
 import { onBeforeRouteLeave } from 'vue-router'
 import { useI18n } from 'vue-i18n'
 import AppLayout from '@/components/layout/AppLayout.vue'
+import HelpTooltip from '@/components/common/HelpTooltip.vue'
 import Select, { type SelectOption } from '@/components/common/Select.vue'
 import StatCard from '@/components/common/StatCard.vue'
 import { Icon } from '@/components/icons'
@@ -271,6 +282,11 @@ interface TerminalLine {
   id: number
   text: string
   tone: TerminalTone
+}
+
+interface ResponseBuffer {
+  prefix: string
+  text: string
 }
 
 const makeStatIcon = (name: StatusIconName) =>
@@ -311,6 +327,7 @@ const terminalRef = ref<HTMLElement | null>(null)
 let abortController: AbortController | null = null
 let terminalLineID = 0
 let modelLoadSequence = 0
+const responseBuffers = new Map<number, ResponseBuffer>()
 
 const running = computed(() => runState.value === 'running')
 const canStart = computed(
@@ -369,6 +386,23 @@ function terminalToneClass(tone: TerminalTone): string {
   }[tone]
 }
 
+function terminalLevel(tone: TerminalTone): string {
+  return {
+    muted: 'INFO ',
+    info: 'INFO ',
+    success: 'OK   ',
+    warning: 'WARN ',
+    danger: 'ERROR'
+  }[tone]
+}
+
+function formatLogTimestamp(date = new Date()): string {
+  const pad = (value: number, width = 2) => String(value).padStart(width, '0')
+  const day = `${date.getFullYear()}-${pad(date.getMonth() + 1)}-${pad(date.getDate())}`
+  const time = `${pad(date.getHours())}:${pad(date.getMinutes())}:${pad(date.getSeconds())}`
+  return `${day} ${time}`
+}
+
 async function scrollTerminalToBottom() {
   await nextTick()
   if (terminalRef.value) terminalRef.value.scrollTop = terminalRef.value.scrollHeight
@@ -377,7 +411,11 @@ async function scrollTerminalToBottom() {
 function appendTerminal(text: string, tone: TerminalTone = 'muted') {
   const normalized = text.trim()
   if (!normalized) return
-  terminalLines.value.push({ id: ++terminalLineID, text: normalized, tone })
+  terminalLines.value.push({
+    id: ++terminalLineID,
+    text: `${formatLogTimestamp()} ${terminalLevel(tone)} ${normalized}`,
+    tone
+  })
   void scrollTerminalToBottom()
 }
 
@@ -407,6 +445,55 @@ function categoryTone(category?: AccountStatusCheckCategory): TerminalTone {
   }
 }
 
+function accountBufferKey(event: AccountStatusCheckEvent): number | null {
+  return typeof event.account_id === 'number' ? event.account_id : null
+}
+
+function appendResponseChunk(event: AccountStatusCheckEvent) {
+  const key = accountBufferKey(event)
+  if (key === null || !event.text) return
+  const current = responseBuffers.get(key) ?? { prefix: accountPrefix(event), text: '' }
+  current.text += event.text
+  responseBuffers.set(key, current)
+}
+
+function formatResponseText(raw: string): string {
+  const text = raw.trim()
+  if (!text) return ''
+  try {
+    return JSON.stringify(JSON.parse(text), null, 2)
+  } catch {
+    return text
+  }
+}
+
+function appendBufferedResponse(buffered: ResponseBuffer) {
+  const content = formatResponseText(buffered.text)
+  if (!content) return
+  const body = content
+    .split(/\r?\n/)
+    .map((line) => `  | ${line}`)
+    .join('\n')
+  appendTerminal(
+    `${buffered.prefix} ${t('admin.accounts.statusCheck.log.response')}\n${body}`,
+    'muted'
+  )
+}
+
+function flushResponse(event: AccountStatusCheckEvent) {
+  const key = accountBufferKey(event)
+  if (key === null) return
+  const buffered = responseBuffers.get(key)
+  if (!buffered) return
+  responseBuffers.delete(key)
+  appendBufferedResponse(buffered)
+}
+
+function flushAllResponses() {
+  for (const buffered of responseBuffers.values()) appendBufferedResponse(buffered)
+  responseBuffers.clear()
+}
+
 function mergeStats(next?: AccountStatusCheckStats) {
   if (next) stats.value = { ...next }
 }
@@ -432,9 +519,17 @@ function handleStatusEvent(event: AccountStatusCheckEvent) {
       )
       break
     case 'account_log':
-      appendTerminal(`${accountPrefix(event)} ${event.text || ''}`, event.log_type === 'error' ? 'danger' : 'muted')
+      if (event.log_type === 'content') {
+        appendResponseChunk(event)
+      } else {
+        if (event.log_type === 'test_complete' || event.log_type === 'error') {
+          flushResponse(event)
+        }
+        appendTerminal(`${accountPrefix(event)} ${event.text || ''}`, event.log_type === 'error' ? 'danger' : 'muted')
+      }
       break
     case 'account_result': {
+      flushResponse(event)
       const status = event.http_status ? `HTTP ${event.http_status}` : categoryLabel(event.category)
       const latency = event.latency_ms !== undefined ? ` · ${event.latency_ms}ms` : ''
       const detail = event.error ? ` · ${event.error}` : ''
@@ -544,6 +639,7 @@ async function startCheck() {
   abortController = controller
   stats.value = emptyStats()
   terminalLines.value = []
+  responseBuffers.clear()
   runState.value = 'running'
   appendTerminal(t('admin.accounts.statusCheck.log.connecting'), 'info')
 
@@ -560,6 +656,7 @@ async function startCheck() {
     if (runState.value === 'running') runState.value = 'completed'
   } catch (error) {
     if (controller.signal.aborted) return
+    flushAllResponses()
     runState.value = 'error'
     const message = error instanceof Error ? error.message : t('admin.accounts.statusCheck.requestFailed')
     appendTerminal(t('admin.accounts.statusCheck.log.requestError', { error: message }), 'danger')
@@ -572,6 +669,7 @@ function stopCheck() {
   if (!abortController) return
   abortController.abort()
   abortController = null
+  flushAllResponses()
   if (runState.value === 'running') {
     runState.value = 'stopped'
     appendTerminal(t('admin.accounts.statusCheck.log.stopRequested'), 'warning')
@@ -581,6 +679,7 @@ function stopCheck() {
 function cancelOnLeave() {
   abortController?.abort()
   abortController = null
+  responseBuffers.clear()
 }
 
 async function copyTerminal() {

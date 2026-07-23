@@ -57,7 +57,8 @@ export default {
           batchComplete: 'Check completed: {completed}/{total}',
           batchStopped: 'The check was canceled.',
           stopRequested: 'Stop requested. Canceling unfinished accounts...',
-          requestError: 'Status check failed: {error}'
+          requestError: 'Status check failed: {error}',
+          response: 'Test response'
         }
       },
       createAccount: 'Create Account',

@@ -90,6 +90,8 @@ describe('AccountStatusCheckView', () => {
     expect(api.list).toHaveBeenCalledWith(1, 1000, { group: '2', lite: 'false' })
     expect((wrapper.vm as unknown as { selectedModelId: string }).selectedModelId).toBe('gpt-5.5')
     expect((wrapper.vm as unknown as { selectedMode: string }).selectedMode).toBe('default')
+    expect(wrapper.findAll('.input-hint')).toHaveLength(0)
+    expect(wrapper.get('[role="img"]').text()).toBe('?')
     expect((wrapper.vm as unknown as { modelOptions: Array<{ value: string }> }).modelOptions.map((item) => item.value)).toEqual([
       'gpt-5.5',
       'gpt-5.3',
@@ -130,5 +132,37 @@ describe('AccountStatusCheckView', () => {
     await flushPromises()
     expect(capturedSignal?.aborted).toBe(true)
     expect((wrapper.vm as unknown as { runState: string }).runState).toBe('stopped')
+  })
+
+  it('wraps streamed response chunks into a timestamped terminal response block', async () => {
+    api.runStatusCheck.mockImplementation(async (_request, onEvent) => {
+      onEvent({
+        type: 'batch_start',
+        total: 1,
+        stats: { total: 1, completed: 0, normal: 0, unauthorized: 0, quota_exhausted: 0, forbidden: 0, other_error: 0 }
+      })
+      for (const text of ['Hello', ' world', '!']) {
+        onEvent({ type: 'account_log', account_id: 11, account_name: 'codex-11', log_type: 'content', text })
+      }
+      onEvent({ type: 'account_log', account_id: 11, account_name: 'codex-11', log_type: 'test_complete', text: 'done' })
+      onEvent({
+        type: 'account_result',
+        account_id: 11,
+        account_name: 'codex-11',
+        category: 'normal',
+        http_status: 200,
+        stats: { total: 1, completed: 1, normal: 1, unauthorized: 0, quota_exhausted: 0, forbidden: 0, other_error: 0 }
+      })
+    })
+
+    const wrapper = mountView()
+    await flushPromises()
+    await wrapper.get('.btn-primary').trigger('click')
+    await flushPromises()
+
+    const terminal = wrapper.get('[role="log"]').text()
+    expect(terminal).toMatch(/\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2} INFO/)
+    expect(terminal).toContain('admin.accounts.statusCheck.log.response')
+    expect(terminal).toContain('Hello world!')
   })
 })
