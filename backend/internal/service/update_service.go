@@ -12,7 +12,9 @@ import (
 	"io"
 	"net/url"
 	"os"
+	"os/exec"
 	"path/filepath"
+	"regexp"
 	"runtime"
 	"sort"
 	"strconv"
@@ -25,7 +27,12 @@ import (
 var (
 	ErrNoUpdateAvailable         = infraerrors.Conflict("ALREADY_UP_TO_DATE", "no update available; current version is latest")
 	ErrRollbackVersionNotAllowed = infraerrors.BadRequest("ROLLBACK_VERSION_NOT_ALLOWED", "version is not in the allowed rollback list")
-	ErrDockerUpdateUnsupported   = infraerrors.BadRequest("DOCKER_UPDATE_REQUIRES_IMAGE_PULL", "Docker deployments must update APP_IMAGE and recreate the container")
+	// ErrDockerUpdateUnsupported is kept for Docker deployments that were not
+	// provisioned with the socket/deployment directory required for online updates.
+	ErrDockerUpdateUnsupported   = infraerrors.BadRequest("DOCKER_UPDATE_NOT_CONFIGURED", "Docker online update is not configured for this deployment")
+	ErrDockerRollbackRequiresVer = infraerrors.BadRequest("DOCKER_ROLLBACK_VERSION_REQUIRED", "Docker rollback requires a release version")
+	ErrInvalidDockerReleaseTag   = infraerrors.BadRequest("INVALID_DOCKER_RELEASE_TAG", "Docker updates require a vX.Y.Z release tag")
+	ErrDockerUpdateFailed        = infraerrors.InternalServer("DOCKER_UPDATE_FAILED", "Docker online update could not be started; check server logs")
 )
 
 const (
@@ -39,12 +46,16 @@ const (
 
 	// Security: max download size (500MB)
 	maxDownloadSize = 500 * 1024 * 1024
+	dockerImageRepo = "ghcr.io/ywainzh/sub2api"
+	dockerSocket    = "/var/run/docker.sock"
 
 	// Rollback: expose at most the 3 most recent versions older than current
 	maxRollbackVersions = 3
 	// Fetch a few extra releases so filtering (current/newer/prerelease) still leaves enough candidates
 	rollbackFetchPageSize = 15
 )
+
+var releaseTagPattern = regexp.MustCompile(`^v[0-9]+\.[0-9]+\.[0-9]+$`)
 
 // UpdateCache defines cache operations for update service
 type UpdateCache interface {
@@ -67,6 +78,8 @@ type UpdateService struct {
 	currentVersion string
 	buildType      string // "source" for manual builds, "release" for CI builds
 	deploymentMode string // "docker" or "binary"
+	deployDir      string
+	commandRunner  func(context.Context, string, ...string) (string, error)
 }
 
 // NewUpdateService creates a new UpdateService
@@ -77,7 +90,17 @@ func NewUpdateService(cache UpdateCache, githubClient GitHubReleaseClient, versi
 		currentVersion: version,
 		buildType:      buildType,
 		deploymentMode: detectDeploymentMode(),
+		deployDir:      strings.TrimSpace(os.Getenv("SUB2API_DEPLOY_DIR")),
+		commandRunner:  runUpdateCommand,
 	}
+}
+
+// UpdateOutcome describes what the caller should do after an update operation.
+// Binary deployments still need an explicit service restart. Docker deployments
+// schedule a helper container that recreates only the application container.
+type UpdateOutcome struct {
+	NeedRestart      bool
+	RestartScheduled bool
 }
 
 // UpdateInfo contains update information
@@ -170,20 +193,26 @@ func (s *UpdateService) CheckUpdate(ctx context.Context, force bool) (*UpdateInf
 // PerformUpdate downloads and applies the update
 // Uses atomic file replacement pattern for safe in-place updates
 func (s *UpdateService) PerformUpdate(ctx context.Context) error {
+	_, err := s.PerformUpdateOutcome(ctx)
+	return err
+}
+
+// PerformUpdateOutcome downloads and applies the latest release.
+func (s *UpdateService) PerformUpdateOutcome(ctx context.Context) (UpdateOutcome, error) {
 	if s.deploymentMode == "docker" {
-		return ErrDockerUpdateUnsupported
+		return s.scheduleDockerUpdate(ctx, "")
 	}
 
 	info, err := s.CheckUpdate(ctx, true)
 	if err != nil {
-		return err
+		return UpdateOutcome{}, err
 	}
 
 	if !info.HasUpdate {
-		return ErrNoUpdateAvailable
+		return UpdateOutcome{}, ErrNoUpdateAvailable
 	}
 
-	return s.applyReleaseAssets(ctx, info.ReleaseInfo.Assets)
+	return UpdateOutcome{NeedRestart: true}, s.applyReleaseAssets(ctx, info.ReleaseInfo.Assets)
 }
 
 // applyReleaseAssets downloads the platform archive from the given release assets,
@@ -298,7 +327,7 @@ func (s *UpdateService) applyReleaseAssets(ctx context.Context, releaseAssets []
 // Rollback restores the previous version
 func (s *UpdateService) Rollback() error {
 	if s.deploymentMode == "docker" {
-		return ErrDockerUpdateUnsupported
+		return ErrDockerRollbackRequiresVer
 	}
 
 	exePath, err := os.Executable()
@@ -348,8 +377,38 @@ func (s *UpdateService) ListRollbackVersions(ctx context.Context) ([]RollbackVer
 // anything else (including the current version) is rejected.
 func (s *UpdateService) RollbackToVersion(ctx context.Context, version string) error {
 	if s.deploymentMode == "docker" {
-		return ErrDockerUpdateUnsupported
+		_, err := s.RollbackToVersionOutcome(ctx, version)
+		return err
 	}
+	return s.rollbackToVersionBinary(ctx, version)
+}
+
+// RollbackToVersionOutcome rolls a Docker deployment back by switching its
+// pinned GHCR image, or performs the legacy binary rollback download.
+func (s *UpdateService) RollbackToVersionOutcome(ctx context.Context, version string) (UpdateOutcome, error) {
+	if s.deploymentMode == "docker" {
+		if s.deployDir == "" {
+			return UpdateOutcome{}, ErrDockerUpdateUnsupported
+		}
+		target := strings.TrimPrefix(strings.TrimSpace(version), "v")
+		if target == "" || !releaseTagPattern.MatchString("v"+target) {
+			return UpdateOutcome{}, ErrRollbackVersionNotAllowed
+		}
+		releases, err := s.fetchRollbackCandidates(ctx)
+		if err != nil {
+			return UpdateOutcome{}, err
+		}
+		for _, release := range releases {
+			if strings.TrimPrefix(release.TagName, "v") == target {
+				return s.scheduleDockerUpdate(ctx, release.TagName)
+			}
+		}
+		return UpdateOutcome{}, ErrRollbackVersionNotAllowed
+	}
+	return UpdateOutcome{NeedRestart: true}, s.rollbackToVersionBinary(ctx, version)
+}
+
+func (s *UpdateService) rollbackToVersionBinary(ctx context.Context, version string) error {
 
 	target := strings.TrimPrefix(strings.TrimSpace(version), "v")
 	if target == "" {
@@ -382,6 +441,88 @@ func (s *UpdateService) RollbackToVersion(ctx context.Context, version string) e
 	}
 
 	return s.applyReleaseAssets(ctx, assets)
+}
+
+func (s *UpdateService) scheduleDockerUpdate(ctx context.Context, requestedVersion string) (UpdateOutcome, error) {
+	if s.deployDir == "" {
+		return UpdateOutcome{}, ErrDockerUpdateUnsupported
+	}
+	normalizedDeployDir := strings.ReplaceAll(s.deployDir, "\\", "/")
+	if !strings.HasPrefix(normalizedDeployDir, "/") || normalizedDeployDir == "/" {
+		return UpdateOutcome{}, ErrDockerUpdateUnsupported
+	}
+	for _, segment := range strings.Split(normalizedDeployDir, "/") {
+		if segment == ".." {
+			return UpdateOutcome{}, ErrDockerUpdateUnsupported
+		}
+	}
+
+	tag := strings.TrimSpace(requestedVersion)
+	if tag == "" {
+		info, err := s.CheckUpdate(ctx, true)
+		if err != nil {
+			return UpdateOutcome{}, err
+		}
+		if !info.HasUpdate || info.ReleaseInfo == nil {
+			return UpdateOutcome{}, ErrNoUpdateAvailable
+		}
+		tag = "v" + strings.TrimPrefix(info.LatestVersion, "v")
+	} else if !strings.HasPrefix(tag, "v") {
+		tag = "v" + tag
+	}
+	if !releaseTagPattern.MatchString(tag) {
+		return UpdateOutcome{}, ErrInvalidDockerReleaseTag
+	}
+	image := dockerImageRepo + ":" + tag
+	if _, err := s.runCommand(ctx, "docker pull", "pull", image); err != nil {
+		return UpdateOutcome{}, ErrDockerUpdateFailed.WithCause(err)
+	}
+
+	// The helper is detached and uses the newly pulled image. It performs the
+	// backup, atomically updates .env, and recreates only sub2api after this
+	// HTTP response has completed, so the current container cannot kill it.
+	args := []string{
+		"run", "-d", "--rm", "--name", "sub2api-updater",
+		"--entrypoint", "/app/docker-update-helper.sh",
+		"-e", "TARGET_IMAGE=" + image,
+		"-e", "DEPLOY_DIR=" + s.deployDir,
+		"-v", dockerSocket + ":" + dockerSocket,
+		"-v", s.deployDir + ":" + s.deployDir + ":rw",
+		"-w", s.deployDir,
+		image,
+	}
+	if _, err := s.runCommand(ctx, "schedule Docker update", args...); err != nil {
+		return UpdateOutcome{}, ErrDockerUpdateFailed.WithCause(err)
+	}
+	return UpdateOutcome{RestartScheduled: true}, nil
+}
+
+func (s *UpdateService) runCommand(ctx context.Context, name string, args ...string) (string, error) {
+	if s.commandRunner == nil {
+		s.commandRunner = runUpdateCommand
+	}
+	return s.commandRunner(ctx, name, args...)
+}
+
+func runUpdateCommand(ctx context.Context, name string, args ...string) (string, error) {
+	cmd := exec.CommandContext(ctx, "docker", args...)
+	out, err := cmd.CombinedOutput()
+	output := truncateUpdateOutput(string(out), 4000)
+	if err != nil {
+		if output != "" {
+			return output, fmt.Errorf("%s failed: %w: %s", name, err, output)
+		}
+		return output, fmt.Errorf("%s failed: %w", name, err)
+	}
+	return output, nil
+}
+
+func truncateUpdateOutput(value string, max int) string {
+	value = strings.TrimSpace(value)
+	if len(value) <= max {
+		return value
+	}
+	return value[:max] + "..."
 }
 
 // fetchRollbackCandidates fetches recent releases and keeps the newest

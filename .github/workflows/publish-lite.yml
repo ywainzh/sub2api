@@ -88,6 +88,7 @@ jobs:
         shell: bash
         env:
           APP_IMAGE: ghcr.io/ywainzh/sub2api:${{ github.ref_name }}
+          DOCKER_GID: 121
           POSTGRES_PASSWORD: ci-postgres-password
           REDIS_PASSWORD: ci-redis-password
           JWT_SECRET: 0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef

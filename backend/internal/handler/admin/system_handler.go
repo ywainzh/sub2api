@@ -51,6 +51,11 @@ type systemUpdateService interface {
 	RollbackToVersion(ctx context.Context, version string) error
 }
 
+type systemUpdateOutcomeService interface {
+	PerformUpdateOutcome(ctx context.Context) (service.UpdateOutcome, error)
+	RollbackToVersionOutcome(ctx context.Context, version string) (service.UpdateOutcome, error)
+}
+
 // NewSystemHandler creates a new SystemHandler
 func NewSystemHandler(updateSvc systemUpdateService, lockSvc *service.SystemOperationLockService) *SystemHandler {
 	return &SystemHandler{
@@ -99,7 +104,13 @@ func (h *SystemHandler) PerformUpdate(c *gin.Context) {
 		updateCtx, cancel := systemUpdateContext(ctx)
 		defer cancel()
 
-		if err := h.updateSvc.PerformUpdate(updateCtx); err != nil {
+		outcome := service.UpdateOutcome{NeedRestart: true}
+		if outcomeSvc, ok := h.updateSvc.(systemUpdateOutcomeService); ok {
+			outcome, err = outcomeSvc.PerformUpdateOutcome(updateCtx)
+		} else {
+			err = h.updateSvc.PerformUpdate(updateCtx)
+		}
+		if err != nil {
 			if errors.Is(err, service.ErrNoUpdateAvailable) {
 				info, checkErr := h.updateSvc.CheckUpdate(updateCtx, false)
 				if checkErr != nil {
@@ -120,10 +131,15 @@ func (h *SystemHandler) PerformUpdate(c *gin.Context) {
 		}
 		succeeded = true
 
+		message := "Update completed. Please restart the service."
+		if outcome.RestartScheduled {
+			message = "Update scheduled. The container will restart automatically."
+		}
 		return gin.H{
-			"message":      "Update completed. Please restart the service.",
-			"need_restart": true,
-			"operation_id": lock.OperationID(),
+			"message":           message,
+			"need_restart":      outcome.NeedRestart,
+			"restart_scheduled": outcome.RestartScheduled,
+			"operation_id":      lock.OperationID(),
 		}, nil
 	})
 }
@@ -175,11 +191,16 @@ func (h *SystemHandler) Rollback(c *gin.Context) {
 			release(releaseReason, succeeded)
 		}()
 
+		outcome := service.UpdateOutcome{NeedRestart: true}
 		if targetVersion != "" {
 			// 指定版本回退同样要下载完整二进制，与更新一样和请求生命周期解耦。
 			rollbackCtx, cancel := systemUpdateContext(ctx)
 			defer cancel()
-			err = h.updateSvc.RollbackToVersion(rollbackCtx, targetVersion)
+			if outcomeSvc, ok := h.updateSvc.(systemUpdateOutcomeService); ok {
+				outcome, err = outcomeSvc.RollbackToVersionOutcome(rollbackCtx, targetVersion)
+			} else {
+				err = h.updateSvc.RollbackToVersion(rollbackCtx, targetVersion)
+			}
 		} else {
 			err = h.updateSvc.Rollback()
 		}
@@ -189,11 +210,16 @@ func (h *SystemHandler) Rollback(c *gin.Context) {
 		}
 		succeeded = true
 
+		message := "Rollback completed. Please restart the service."
+		if outcome.RestartScheduled {
+			message = "Rollback scheduled. The container will restart automatically."
+		}
 		return gin.H{
-			"message":      "Rollback completed. Please restart the service.",
-			"need_restart": true,
-			"version":      targetVersion,
-			"operation_id": lock.OperationID(),
+			"message":           message,
+			"need_restart":      outcome.NeedRestart,
+			"restart_scheduled": outcome.RestartScheduled,
+			"version":           targetVersion,
+			"operation_id":      lock.OperationID(),
 		}, nil
 	})
 }

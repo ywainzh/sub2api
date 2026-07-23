@@ -10,17 +10,19 @@ if [ ! -f .env ]; then
 fi
 
 umask 077
-set -a
-. ./.env
-set +a
 
 mkdir -p backups
 timestamp="$(date +%Y%m%d-%H%M%S)"
 backup_file="backups/sub2api.${timestamp}.sql.gz"
+raw_file="backups/sub2api.${timestamp}.sql"
+trap 'rm -f "$raw_file"' EXIT
 
 docker compose exec -T postgres \
-    pg_dump -U "${POSTGRES_USER:-sub2api}" -d "${POSTGRES_DB:-sub2api}" \
-    | gzip > "$backup_file"
+    sh -c 'exec pg_dump -U "$POSTGRES_USER" -d "$POSTGRES_DB"' \
+    > "$raw_file"
 
+test -s "$raw_file"
+gzip -c "$raw_file" > "$backup_file"
 test -s "$backup_file"
+rm -f "$raw_file"
 find backups -maxdepth 1 -type f -name 'sub2api.*.sql.gz' -mtime +6 -delete

@@ -36,6 +36,8 @@ export default {
     updateComplete: '更新完成',
     updateFailed: '更新失败',
     restartRequired: '请重启服务以应用更新',
+    containerRestartScheduled: '容器更新已安排，服务将自动重启',
+    waitingForContainer: '正在等待新容器启动...',
     restartNow: '立即重启',
     restarting: '正在重启...',
     retry: '重试',
@@ -54,7 +56,7 @@ export default {
     rollbackSourceHint: '源码构建不支持在线回退',
     deployScript: '脚本部署',
     deployDocker: 'Docker',
-    dockerUpdateHint: '当前是 Docker 部署，请在服务器执行以下命令更新镜像。',
+    dockerRollbackWarning: '将切换到所选镜像并自动重启容器，数据库不会回退。',
     dockerEditCompose: '修改 docker-compose.yml 中的镜像版本',
     dockerRecreate: '重新创建容器'
   },

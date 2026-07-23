@@ -36,6 +36,20 @@ type systemHandlerUpdateServiceStub struct {
 	rollbackVersionsCall  int
 }
 
+type systemHandlerOutcomeServiceStub struct {
+	*systemHandlerUpdateServiceStub
+	updateOutcome   service.UpdateOutcome
+	rollbackOutcome service.UpdateOutcome
+}
+
+func (s *systemHandlerOutcomeServiceStub) PerformUpdateOutcome(context.Context) (service.UpdateOutcome, error) {
+	return s.updateOutcome, s.performErr
+}
+
+func (s *systemHandlerOutcomeServiceStub) RollbackToVersionOutcome(context.Context, string) (service.UpdateOutcome, error) {
+	return s.rollbackOutcome, s.rollbackToErr
+}
+
 func (s *systemHandlerUpdateServiceStub) CheckUpdate(_ context.Context, force bool) (*service.UpdateInfo, error) {
 	s.checkForces = append(s.checkForces, force)
 	return s.updateInfo, s.checkErr
@@ -83,7 +97,7 @@ type systemUpdateErrorEnvelope struct {
 	Message string `json:"message"`
 }
 
-func newSystemHandlerTestRouter(t *testing.T, updateSvc *systemHandlerUpdateServiceStub, repo *memoryIdempotencyRepoStub) *gin.Engine {
+func newSystemHandlerTestRouter(t *testing.T, updateSvc systemUpdateService, repo *memoryIdempotencyRepoStub) *gin.Engine {
 	t.Helper()
 	gin.SetMode(gin.TestMode)
 	service.SetDefaultIdempotencyCoordinator(nil)
@@ -102,6 +116,35 @@ func newSystemHandlerTestRouter(t *testing.T, updateSvc *systemHandlerUpdateServ
 	router.POST("/api/v1/admin/system/rollback", handler.Rollback)
 	router.GET("/api/v1/admin/system/rollback-versions", handler.GetRollbackVersions)
 	return router
+}
+
+func TestSystemHandlerPerformUpdateReturnsScheduledRestart(t *testing.T) {
+	updateSvc := &systemHandlerOutcomeServiceStub{
+		systemHandlerUpdateServiceStub: &systemHandlerUpdateServiceStub{},
+		updateOutcome: service.UpdateOutcome{
+			RestartScheduled: true,
+		},
+	}
+	repo := newMemoryIdempotencyRepoStub()
+	router := newSystemHandlerTestRouter(t, updateSvc, repo)
+
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/admin/system/update", nil)
+	req.Header.Set("Idempotency-Key", "docker-update")
+	router.ServeHTTP(rec, req)
+
+	require.Equal(t, http.StatusOK, rec.Code)
+	var body struct {
+		Data struct {
+			Message          string `json:"message"`
+			NeedRestart      bool   `json:"need_restart"`
+			RestartScheduled bool   `json:"restart_scheduled"`
+		} `json:"data"`
+	}
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &body))
+	require.False(t, body.Data.NeedRestart)
+	require.True(t, body.Data.RestartScheduled)
+	require.Equal(t, "Update scheduled. The container will restart automatically.", body.Data.Message)
 }
 
 func requireSystemLockStatus(t *testing.T, repo *memoryIdempotencyRepoStub, wantStatus string) {

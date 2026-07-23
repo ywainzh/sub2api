@@ -111,8 +111,62 @@ func TestUpdateServiceRejectsInPlaceChangesForDocker(t *testing.T) {
 	svc := NewUpdateService(&updateServiceCacheStub{}, &updateServiceGitHubClientStub{}, "0.1.1", "release")
 
 	require.ErrorIs(t, svc.PerformUpdate(context.Background()), ErrDockerUpdateUnsupported)
-	require.ErrorIs(t, svc.Rollback(), ErrDockerUpdateUnsupported)
+	require.ErrorIs(t, svc.Rollback(), ErrDockerRollbackRequiresVer)
 	require.ErrorIs(t, svc.RollbackToVersion(context.Background(), "0.1.0"), ErrDockerUpdateUnsupported)
+}
+
+func TestUpdateServiceSchedulesPinnedDockerImage(t *testing.T) {
+	t.Setenv("SUB2API_DEPLOYMENT_MODE", "docker")
+	t.Setenv("SUB2API_DEPLOY_DIR", "/opt/sub2api")
+	svc := NewUpdateService(
+		&updateServiceCacheStub{},
+		&updateServiceGitHubClientStub{release: &GitHubRelease{TagName: "v0.1.2"}},
+		"0.1.1",
+		"release",
+	)
+
+	type commandCall struct {
+		name string
+		args []string
+	}
+	var calls []commandCall
+	svc.commandRunner = func(_ context.Context, name string, args ...string) (string, error) {
+		calls = append(calls, commandCall{name: name, args: append([]string(nil), args...)})
+		return "ok", nil
+	}
+
+	outcome, err := svc.PerformUpdateOutcome(context.Background())
+
+	require.NoError(t, err)
+	require.False(t, outcome.NeedRestart)
+	require.True(t, outcome.RestartScheduled)
+	require.Len(t, calls, 2)
+	require.Equal(t, "docker pull", calls[0].name)
+	require.Equal(t, []string{"pull", "ghcr.io/ywainzh/sub2api:v0.1.2"}, calls[0].args)
+	require.Equal(t, "schedule Docker update", calls[1].name)
+	require.Contains(t, calls[1].args, "TARGET_IMAGE=ghcr.io/ywainzh/sub2api:v0.1.2")
+	require.Contains(t, calls[1].args, "/app/docker-update-helper.sh")
+}
+
+func TestUpdateServiceRejectsNonSemverDockerRelease(t *testing.T) {
+	t.Setenv("SUB2API_DEPLOYMENT_MODE", "docker")
+	t.Setenv("SUB2API_DEPLOY_DIR", "/opt/sub2api")
+	svc := NewUpdateService(
+		&updateServiceCacheStub{},
+		&updateServiceGitHubClientStub{release: &GitHubRelease{TagName: "v0.1.2-rc.1"}},
+		"0.1.1",
+		"release",
+	)
+	called := false
+	svc.commandRunner = func(context.Context, string, ...string) (string, error) {
+		called = true
+		return "", nil
+	}
+
+	_, err := svc.PerformUpdateOutcome(context.Background())
+
+	require.ErrorIs(t, err, ErrInvalidDockerReleaseTag)
+	require.False(t, called)
 }
 
 func newRollbackTestService(current string, releases []*GitHubRelease) *UpdateService {

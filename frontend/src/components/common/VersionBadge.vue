@@ -149,8 +149,8 @@
                 </button>
               </div>
 
-              <!-- Priority 2: Update success - need restart -->
-              <div v-else-if="updateSuccess && needRestart" class="space-y-2">
+              <!-- Priority 2: Update success -->
+              <div v-else-if="updateSuccess && (needRestart || restartScheduled)" class="space-y-2">
                 <div
                   class="flex items-center gap-3 rounded-lg border border-green-200 bg-green-50 p-3 dark:border-green-800/50 dark:bg-green-900/20"
                 >
@@ -176,13 +176,40 @@
                       }}
                     </p>
                     <p class="text-xs text-green-600/70 dark:text-green-400/70">
-                      {{ t('version.restartRequired') }}
+                      {{
+                        restartScheduled
+                          ? t('version.containerRestartScheduled')
+                          : t('version.restartRequired')
+                      }}
                     </p>
                   </div>
                 </div>
 
+                <div
+                  v-if="restartScheduled"
+                  class="flex items-center justify-center gap-2 rounded-lg bg-green-500 px-4 py-2 text-sm font-medium text-white"
+                >
+                  <svg class="h-4 w-4 animate-spin" fill="none" viewBox="0 0 24 24">
+                    <circle
+                      class="opacity-25"
+                      cx="12"
+                      cy="12"
+                      r="10"
+                      stroke="currentColor"
+                      stroke-width="4"
+                    ></circle>
+                    <path
+                      class="opacity-75"
+                      fill="currentColor"
+                      d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z"
+                    ></path>
+                  </svg>
+                  <span>{{ t('version.waitingForContainer') }}</span>
+                </div>
+
                 <!-- Restart button with countdown -->
                 <button
+                  v-else
                   @click="handleRestart"
                   :disabled="restarting"
                   class="flex w-full items-center justify-center gap-2 rounded-lg bg-green-500 px-4 py-2 text-sm font-medium text-white transition-colors hover:bg-green-600 disabled:cursor-not-allowed disabled:opacity-50"
@@ -291,69 +318,8 @@
                 </div>
               </div>
 
-              <!-- Priority 4: Docker image update instructions -->
-              <div v-else-if="hasUpdate && isDockerDeployment" class="space-y-2">
-                <div
-                  class="flex items-center gap-3 rounded-lg border border-amber-200 bg-amber-50 p-3 dark:border-amber-800/50 dark:bg-amber-900/20"
-                >
-                  <div
-                    class="flex h-8 w-8 flex-shrink-0 items-center justify-center rounded-full bg-amber-100 dark:bg-amber-900/50"
-                  >
-                    <Icon
-                      name="download"
-                      size="sm"
-                      :stroke-width="2"
-                      class="text-amber-600 dark:text-amber-400"
-                    />
-                  </div>
-                  <div class="min-w-0 flex-1">
-                    <p class="text-sm font-medium text-amber-700 dark:text-amber-300">
-                      {{ t('version.updateAvailable') }}
-                    </p>
-                    <p class="text-xs text-amber-600/70 dark:text-amber-400/70">
-                      v{{ latestVersion }}
-                    </p>
-                  </div>
-                </div>
-
-                <div
-                  class="rounded-lg border border-blue-200 bg-blue-50 p-3 dark:border-blue-800/50 dark:bg-blue-900/20"
-                >
-                  <p class="mb-2 text-xs leading-4 text-blue-700 dark:text-blue-300">
-                    {{ t('version.dockerUpdateHint') }}
-                  </p>
-                  <div
-                    class="flex items-start gap-2 rounded-md border border-blue-200/70 bg-white/70 p-2 dark:border-blue-700/60 dark:bg-dark-900/30"
-                  >
-                    <code
-                      class="min-w-0 flex-1 whitespace-pre-wrap break-all text-[11px] leading-4 text-blue-800 dark:text-blue-200"
-                      >{{ dockerUpdateCommand }}</code
-                    >
-                    <button
-                      type="button"
-                      @click="copyToClipboard(dockerUpdateCommand)"
-                      class="flex-shrink-0 rounded p-1 text-blue-500 transition-colors hover:bg-blue-100 hover:text-blue-700 dark:hover:bg-blue-900/50 dark:hover:text-blue-200"
-                      :title="copied ? t('version.copied') : t('version.copyCommand')"
-                    >
-                      <Icon :name="copied ? 'check' : 'copy'" size="xs" :stroke-width="2" />
-                    </button>
-                  </div>
-                </div>
-
-                <a
-                  v-if="releaseInfo?.html_url && releaseInfo.html_url !== '#'"
-                  :href="releaseInfo.html_url"
-                  target="_blank"
-                  rel="noopener noreferrer"
-                  class="flex items-center justify-center gap-1 text-xs text-gray-500 transition-colors hover:text-gray-700 dark:text-dark-400 dark:hover:text-dark-200"
-                >
-                  {{ t('version.viewChangelog') }}
-                  <Icon name="externalLink" size="xs" :stroke-width="2" />
-                </a>
-              </div>
-
-              <!-- Priority 5: Update available for a standalone release binary -->
-              <div v-else-if="hasUpdate && isReleaseBuild && !isDockerDeployment" class="space-y-2">
+              <!-- Priority 4: Online update for release builds -->
+              <div v-else-if="hasUpdate && isReleaseBuild" class="space-y-2">
                 <!-- Update info card -->
                 <div
                   class="flex items-center gap-3 rounded-lg border border-amber-200 bg-amber-50 p-3 dark:border-amber-800/50 dark:bg-amber-900/20"
@@ -575,55 +541,57 @@
                           </span>
                         </button>
 
-                        <!-- Selected version: manual command (per deploy method) + confirm -->
+                        <!-- Selected version: optional manual fallback + confirm -->
                         <transition name="rollback">
                           <div v-if="selectedRollbackVersion" class="space-y-2">
-                            <p class="px-0.5 text-[11px] text-gray-400 dark:text-dark-500">
-                              {{ t('version.manualRollbackCommand') }}
-                            </p>
+                            <template v-if="!isDockerDeployment">
+                              <p class="px-0.5 text-[11px] text-gray-400 dark:text-dark-500">
+                                {{ t('version.manualRollbackCommand') }}
+                              </p>
 
-                            <!-- Terminal-style block with deploy-method tabs -->
-                            <div
-                              class="overflow-hidden rounded-lg border border-gray-200 dark:border-dark-600"
-                            >
+                              <!-- Terminal-style block with deploy-method tabs -->
                               <div
-                                class="flex items-center justify-between border-b border-gray-200 bg-gray-100 px-2 py-1.5 dark:border-dark-600 dark:bg-dark-700"
+                                class="overflow-hidden rounded-lg border border-gray-200 dark:border-dark-600"
                               >
                                 <div
-                                  class="flex items-center gap-0.5 rounded-md bg-gray-200/70 p-0.5 dark:bg-dark-600/70"
+                                  class="flex items-center justify-between border-b border-gray-200 bg-gray-100 px-2 py-1.5 dark:border-dark-600 dark:bg-dark-700"
                                 >
-                                  <button
-                                    v-for="tab in manualTabs"
-                                    :key="tab.key"
-                                    @click="manualTab = tab.key"
-                                    class="rounded px-2 py-0.5 text-[11px] font-medium transition-colors"
-                                    :class="
-                                      manualTab === tab.key
-                                        ? 'bg-white text-gray-700 shadow-sm dark:bg-dark-800 dark:text-dark-100'
-                                        : 'text-gray-400 hover:text-gray-600 dark:text-dark-400 dark:hover:text-dark-200'
-                                    "
+                                  <div
+                                    class="flex items-center gap-0.5 rounded-md bg-gray-200/70 p-0.5 dark:bg-dark-600/70"
                                   >
-                                    {{ tab.label }}
+                                    <button
+                                      v-for="tab in manualTabs"
+                                      :key="tab.key"
+                                      @click="manualTab = tab.key"
+                                      class="rounded px-2 py-0.5 text-[11px] font-medium transition-colors"
+                                      :class="
+                                        manualTab === tab.key
+                                          ? 'bg-white text-gray-700 shadow-sm dark:bg-dark-800 dark:text-dark-100'
+                                          : 'text-gray-400 hover:text-gray-600 dark:text-dark-400 dark:hover:text-dark-200'
+                                      "
+                                    >
+                                      {{ tab.label }}
+                                    </button>
+                                  </div>
+                                  <button
+                                    @click="copyToClipboard(activeManualCommand)"
+                                    class="flex items-center gap-1 rounded px-1.5 py-0.5 text-[11px] text-gray-400 transition-colors hover:bg-gray-200 hover:text-gray-600 dark:text-dark-400 dark:hover:bg-dark-600 dark:hover:text-dark-200"
+                                  >
+                                    <Icon
+                                      :name="copied ? 'check' : 'copy'"
+                                      size="xs"
+                                      :stroke-width="2"
+                                      :class="copied ? 'text-green-500' : ''"
+                                    />
+                                    {{ copied ? t('version.copied') : t('version.copyCommand') }}
                                   </button>
                                 </div>
-                                <button
-                                  @click="copyToClipboard(activeManualCommand)"
-                                  class="flex items-center gap-1 rounded px-1.5 py-0.5 text-[11px] text-gray-400 transition-colors hover:bg-gray-200 hover:text-gray-600 dark:text-dark-400 dark:hover:bg-dark-600 dark:hover:text-dark-200"
+                                <code
+                                  class="block select-all whitespace-pre-wrap break-all bg-gray-50 p-2.5 font-mono text-[10px] leading-relaxed text-gray-600 dark:bg-dark-900 dark:text-dark-300"
+                                  >{{ activeManualCommand }}</code
                                 >
-                                  <Icon
-                                    :name="copied ? 'check' : 'copy'"
-                                    size="xs"
-                                    :stroke-width="2"
-                                    :class="copied ? 'text-green-500' : ''"
-                                  />
-                                  {{ copied ? t('version.copied') : t('version.copyCommand') }}
-                                </button>
                               </div>
-                              <code
-                                class="block select-all whitespace-pre-wrap break-all bg-gray-50 p-2.5 font-mono text-[10px] leading-relaxed text-gray-600 dark:bg-dark-900 dark:text-dark-300"
-                                >{{ activeManualCommand }}</code
-                              >
-                            </div>
+                            </template>
 
                             <p
                               class="flex items-start gap-1.5 px-0.5 text-[11px] leading-4 text-amber-600 dark:text-amber-400"
@@ -634,7 +602,11 @@
                                 :stroke-width="2"
                                 class="mt-px flex-shrink-0"
                               />
-                              {{ t('version.rollbackWarning') }}
+                              {{
+                                isDockerDeployment
+                                  ? t('version.dockerRollbackWarning')
+                                  : t('version.rollbackWarning')
+                              }}
                             </p>
 
                             <p
@@ -747,6 +719,7 @@ const deploymentMode = computed(() => appStore.deploymentMode)
 const updating = ref(false)
 const restarting = ref(false)
 const needRestart = ref(false)
+const restartScheduled = ref(false)
 const updateError = ref('')
 const updateSuccess = ref(false)
 const restartCountdown = ref(0)
@@ -798,16 +771,6 @@ const activeManualCommand = computed(() =>
 // Only show update check for release builds (binary/docker deployment)
 const isReleaseBuild = computed(() => buildType.value === 'release')
 const isDockerDeployment = computed(() => deploymentMode.value === 'docker')
-const dockerUpdateCommand = computed(() => {
-  if (!latestVersion.value) return ''
-  return [
-    'cd /opt/sub2api',
-    './backup.sh',
-    `sed -i 's#^APP_IMAGE=.*#APP_IMAGE=${DOCKER_IMAGE}:v${latestVersion.value}#' .env`,
-    'docker compose pull',
-    'docker compose up -d'
-  ].join('\n')
-})
 
 function toggleDropdown() {
   dropdownOpen.value = !dropdownOpen.value
@@ -824,6 +787,7 @@ async function refreshVersion(force = true) {
   updateError.value = ''
   updateSuccess.value = false
   needRestart.value = false
+  restartScheduled.value = false
   resetRollbackState()
 
   await appStore.fetchVersion(force)
@@ -840,9 +804,13 @@ async function handleUpdate() {
     const result = await performUpdate()
     successKind.value = 'update'
     updateSuccess.value = true
-    needRestart.value = result.need_restart
+    needRestart.value = result.need_restart === true
+    restartScheduled.value = result.restart_scheduled === true
     // Clear version cache to reflect update completed
     appStore.clearVersionCache()
+    if (restartScheduled.value) {
+      void waitForScheduledRestart(latestVersion.value)
+    }
   } catch (error: unknown) {
     const err = error as { response?: { data?: { message?: string } }; message?: string }
     updateError.value = err.response?.data?.message || err.message || t('version.updateFailed')
@@ -914,10 +882,14 @@ async function handleRollback() {
     const result = await rollbackAPI(selectedRollbackVersion.value)
     successKind.value = 'rollback'
     updateSuccess.value = true
-    needRestart.value = result.need_restart
+    needRestart.value = result.need_restart === true
+    restartScheduled.value = result.restart_scheduled === true
     rollbackPanelOpen.value = false
     // Clear version cache so the next check reflects the rolled-back version
     appStore.clearVersionCache()
+    if (restartScheduled.value) {
+      void waitForScheduledRestart(selectedRollbackVersion.value)
+    }
   } catch (error: unknown) {
     const err = error as { response?: { data?: { message?: string } }; message?: string }
     rollbackError.value = err.response?.data?.message || err.message || t('version.rollbackFailed')
@@ -976,6 +948,28 @@ async function checkServiceAndReload() {
   }
 
   // After retries, reload anyway
+  window.location.reload()
+}
+
+async function waitForScheduledRestart(targetVersion: string) {
+  // Let the detached helper start the replacement before the first health check;
+  // otherwise the old container can answer and the page would reload too early.
+  await new Promise((resolve) => setTimeout(resolve, 8000))
+  for (let attempt = 0; attempt < 30; attempt++) {
+    try {
+      const health = await fetch('/health', { method: 'GET', cache: 'no-cache' })
+      if (health.ok) {
+        const info = await appStore.fetchVersion(true)
+        if (info && displayVersion(info.current_version) === targetVersion) {
+          window.location.reload()
+          return
+        }
+      }
+    } catch {
+      // The replacement container may be between stopped and healthy states.
+    }
+    await new Promise((resolve) => setTimeout(resolve, 2000))
+  }
   window.location.reload()
 }
 

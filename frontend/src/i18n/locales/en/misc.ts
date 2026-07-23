@@ -36,6 +36,8 @@ export default {
     updateComplete: 'Update Complete',
     updateFailed: 'Update Failed',
     restartRequired: 'Please restart the service to apply the update',
+    containerRestartScheduled: 'The container update is scheduled and will restart automatically',
+    waitingForContainer: 'Waiting for the new container to start...',
     restartNow: 'Restart Now',
     restarting: 'Restarting...',
     retry: 'Retry',
@@ -55,7 +57,7 @@ export default {
     rollbackSourceHint: 'Online rollback is not available for source builds',
     deployScript: 'Script',
     deployDocker: 'Docker',
-    dockerUpdateHint: 'This is a Docker deployment. Run the following commands on the server to update the image.',
+    dockerRollbackWarning: 'The selected image will be activated and the container restarted. Database data is unchanged.',
     dockerEditCompose: 'Edit the image tag in docker-compose.yml',
     dockerRecreate: 'Recreate the container'
   },

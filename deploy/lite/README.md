@@ -10,6 +10,7 @@
 | 应用监听 | `127.0.0.1:39080` |
 | 公网域名 | `https://sub2api.zyspeed.xyz` |
 | 数据目录 | `/opt/sub2api/data`、`postgres_data`、`redis_data` |
+| Docker socket GID | 服务器实际 `/var/run/docker.sock` 的 group id，当前服务器为 `121` |
 
 ## 版本规则
 
@@ -66,7 +67,7 @@ git push origin v0.1.1
 sub2api.zyspeed.xyz -> 47.251.82.144
 ```
 
-确认服务器已安装 Docker、Docker Compose、Nginx、Certbot，并确保 `39080` 未被占用。PostgreSQL 和 Redis 不需要、也不应暴露到宿主机。
+确认服务器已安装 Docker、Docker Compose、Nginx、Certbot，并确保 `39080` 未被占用。在线更新需要应用容器访问宿主机 Docker socket，因此必须使用本手册中的 Compose 文件和 `DOCKER_GID`；PostgreSQL 和 Redis 不需要、也不应暴露到宿主机。
 
 ### 下载并校验部署包
 
@@ -114,6 +115,9 @@ unset postgres_password redis_password jwt_secret totp_key admin_password
 
 sudo chmod 600 .env
 sudo mkdir -p data postgres_data redis_data backups
+docker_gid=$(stat -c '%g' /var/run/docker.sock)
+sudo sed -i "s#^DOCKER_GID=.*#DOCKER_GID=${docker_gid}#" .env
+unset docker_gid
 grep -q ':latest$' .env && echo 'APP_IMAGE must use a fixed version' >&2 && exit 1 || true
 docker compose config --quiet
 ```
@@ -173,18 +177,41 @@ curl -fsS -H 'Host: sub2api.zyspeed.xyz' http://127.0.0.1/health
 
 ## 升级到新版本
 
-升级不会重新构建，不会删除数据目录。以 `v0.1.1` 为例：
+升级不会重新构建，不会删除数据目录。当前 Compose 已包含 Docker socket 挂载，版本菜单会直接执行在线更新。以 `v0.1.1` 为例：
 
-管理后台的版本菜单会识别 Docker 部署并显示当前目标版本的升级命令。Docker 部署不会在容器内替换二进制，因为容器重建后该修改会丢失；应始终通过固定 GHCR tag 拉取并重建应用容器。
+1. 在管理后台右上角版本菜单点击“立即更新”。
+2. 后端校验最新版本必须是固定的 `vX.Y.Z`，拉取 `ghcr.io/ywainzh/sub2api:v0.1.1`。
+3. 独立更新助手先执行 PostgreSQL 备份，再原子修改 `.env`，只重建 `sub2api` 容器；PostgreSQL、Redis 和数据目录不重建。
+4. 页面等待目标版本健康检查通过后自动刷新。
+
+更新日志写入 `/opt/sub2api/backups/update-*.log`，数据库备份写入同目录。更新助手失败会恢复更新前的 `.env` 和旧镜像配置，并尝试恢复旧容器。
+
+如果版本菜单提示 Docker 在线更新未配置，说明服务器仍使用旧部署包，先按“旧部署迁移”完成一次迁移，再使用页面更新。
+
+### 旧部署迁移
+
+已运行的 `v0.1.3` 或更早版本不会自动获得 socket 挂载。停机窗口内下载最新部署包，保留现有 `.env`、`data/`、`postgres_data/`、`redis_data/` 和 `backups/`，只覆盖 Compose、脚本和文档：
 
 ```bash
 cd /opt/sub2api
 ./backup.sh
 cp .env "backups/.env.$(date +%Y%m%d-%H%M%S)"
 
-sed -i 's#^APP_IMAGE=.*#APP_IMAGE=ghcr.io/ywainzh/sub2api:v0.1.1#' .env
-grep '^APP_IMAGE=' .env
-
+export SUB2API_TAG=v0.1.5
+curl -fsSL "https://github.com/ywainzh/sub2api/releases/download/${SUB2API_TAG}/sub2api-deploy-${SUB2API_TAG}.tar.gz" -o /tmp/sub2api-deploy.tar.gz
+mkdir -p /tmp/sub2api-deploy
+tar -xzf /tmp/sub2api-deploy.tar.gz -C /tmp/sub2api-deploy
+cp /tmp/sub2api-deploy/docker-compose.yml /opt/sub2api/docker-compose.yml
+cp /tmp/sub2api-deploy/backup.sh /opt/sub2api/backup.sh
+chmod 750 /opt/sub2api/backup.sh
+docker_gid=$(stat -c '%g' /var/run/docker.sock)
+if grep -q '^DOCKER_GID=' .env; then
+    sed -i "s#^DOCKER_GID=.*#DOCKER_GID=${docker_gid}#" .env
+else
+    printf '\nDOCKER_GID=%s\n' "$docker_gid" >> .env
+fi
+unset docker_gid
+docker compose config --quiet
 docker compose pull
 docker compose up -d
 docker compose ps
@@ -192,13 +219,15 @@ docker compose logs --tail=200 sub2api
 curl -fsS https://sub2api.zyspeed.xyz/health
 ```
 
-发布包可用于更新 Compose、Nginx 或备份脚本；解压前保留现有 `.env`、`data/`、`postgres_data/`、`redis_data/` 和 `backups/`，不要用发布包覆盖这些目录。
+发布包可用于更新 Compose、Nginx 或备份脚本；解压前保留现有 `.env`、`data/`、`postgres_data/`、`redis_data/` 和 `backups/`，不要用发布包覆盖这些目录。上面的 `cp` 只覆盖配置模板和脚本，不会触碰业务数据。
 
 升级成功后只清理旧的 `ghcr.io/ywainzh/sub2api:*` 镜像，保留当前和上一版。不要运行 `docker system prune -a`，因为它可能影响同机的其他项目。
 
 ## 回滚
 
-镜像回滚仅修改 `APP_IMAGE`，不会回滚数据库内容：
+在管理后台版本菜单展开“版本回退”，选择最近的固定版本即可在线回滚。Docker 回滚同样先拉取目标 GHCR 镜像，再由助手切换 `.env` 并重建 `sub2api`；不会回滚数据库内容。
+
+服务器无法访问后台时，也可以手工回滚镜像：
 
 ```bash
 cd /opt/sub2api

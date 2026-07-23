@@ -44,6 +44,7 @@ export async function checkUpdates(force = false): Promise<VersionInfo> {
 export interface UpdateResult {
   message: string
   need_restart: boolean
+  restart_scheduled?: boolean
 }
 
 export interface RollbackVersionInfo {
