@@ -25,6 +25,7 @@ import (
 var (
 	ErrNoUpdateAvailable         = infraerrors.Conflict("ALREADY_UP_TO_DATE", "no update available; current version is latest")
 	ErrRollbackVersionNotAllowed = infraerrors.BadRequest("ROLLBACK_VERSION_NOT_ALLOWED", "version is not in the allowed rollback list")
+	ErrDockerUpdateUnsupported   = infraerrors.BadRequest("DOCKER_UPDATE_REQUIRES_IMAGE_PULL", "Docker deployments must update APP_IMAGE and recreate the container")
 )
 
 const (
@@ -65,6 +66,7 @@ type UpdateService struct {
 	githubClient   GitHubReleaseClient
 	currentVersion string
 	buildType      string // "source" for manual builds, "release" for CI builds
+	deploymentMode string // "docker" or "binary"
 }
 
 // NewUpdateService creates a new UpdateService
@@ -74,6 +76,7 @@ func NewUpdateService(cache UpdateCache, githubClient GitHubReleaseClient, versi
 		githubClient:   githubClient,
 		currentVersion: version,
 		buildType:      buildType,
+		deploymentMode: detectDeploymentMode(),
 	}
 }
 
@@ -86,6 +89,7 @@ type UpdateInfo struct {
 	Cached         bool         `json:"cached"`
 	Warning        string       `json:"warning,omitempty"`
 	BuildType      string       `json:"build_type"` // "source" or "release"
+	DeploymentMode string       `json:"deployment_mode"` // "docker" or "binary"
 }
 
 // ReleaseInfo contains GitHub release details
@@ -152,6 +156,7 @@ func (s *UpdateService) CheckUpdate(ctx context.Context, force bool) (*UpdateInf
 			HasUpdate:      false,
 			Warning:        err.Error(),
 			BuildType:      s.buildType,
+			DeploymentMode: s.deploymentMode,
 		}, nil
 	}
 
@@ -163,6 +168,10 @@ func (s *UpdateService) CheckUpdate(ctx context.Context, force bool) (*UpdateInf
 // PerformUpdate downloads and applies the update
 // Uses atomic file replacement pattern for safe in-place updates
 func (s *UpdateService) PerformUpdate(ctx context.Context) error {
+	if s.deploymentMode == "docker" {
+		return ErrDockerUpdateUnsupported
+	}
+
 	info, err := s.CheckUpdate(ctx, true)
 	if err != nil {
 		return err
@@ -180,13 +189,18 @@ func (s *UpdateService) PerformUpdate(ctx context.Context) error {
 // Shared by PerformUpdate (latest) and RollbackToVersion (specific older version).
 func (s *UpdateService) applyReleaseAssets(ctx context.Context, releaseAssets []Asset) error {
 	// Find matching archive and checksum for current platform
-	archiveName := s.getArchiveName()
+	archiveNames := s.getArchiveNames()
 	var downloadURL string
 	var checksumURL string
 
 	for _, asset := range releaseAssets {
-		if strings.Contains(asset.Name, archiveName) && !strings.HasSuffix(asset.Name, ".txt") {
-			downloadURL = asset.DownloadURL
+		if !strings.HasSuffix(asset.Name, ".txt") {
+			for _, archiveName := range archiveNames {
+				if strings.Contains(asset.Name, archiveName) {
+					downloadURL = asset.DownloadURL
+					break
+				}
+			}
 		}
 		if asset.Name == "checksums.txt" {
 			checksumURL = asset.DownloadURL
@@ -281,6 +295,10 @@ func (s *UpdateService) applyReleaseAssets(ctx context.Context, releaseAssets []
 
 // Rollback restores the previous version
 func (s *UpdateService) Rollback() error {
+	if s.deploymentMode == "docker" {
+		return ErrDockerUpdateUnsupported
+	}
+
 	exePath, err := os.Executable()
 	if err != nil {
 		return fmt.Errorf("failed to get executable path: %w", err)
@@ -327,6 +345,10 @@ func (s *UpdateService) ListRollbackVersions(ctx context.Context) ([]RollbackVer
 // The target must be one of the versions returned by ListRollbackVersions;
 // anything else (including the current version) is rejected.
 func (s *UpdateService) RollbackToVersion(ctx context.Context, version string) error {
+	if s.deploymentMode == "docker" {
+		return ErrDockerUpdateUnsupported
+	}
+
 	target := strings.TrimPrefix(strings.TrimSpace(version), "v")
 	if target == "" {
 		return ErrRollbackVersionNotAllowed
@@ -429,6 +451,7 @@ func (s *UpdateService) fetchLatestRelease(ctx context.Context) (*UpdateInfo, er
 		},
 		Cached:    false,
 		BuildType: s.buildType,
+		DeploymentMode: s.deploymentMode,
 	}, nil
 }
 
@@ -436,10 +459,25 @@ func (s *UpdateService) downloadFile(ctx context.Context, downloadURL, dest stri
 	return s.githubClient.DownloadFile(ctx, downloadURL, dest, maxDownloadSize)
 }
 
-func (s *UpdateService) getArchiveName() string {
+func (s *UpdateService) getArchiveNames() []string {
 	osName := runtime.GOOS
 	arch := runtime.GOARCH
-	return fmt.Sprintf("%s_%s", osName, arch)
+	// Releases before the fork used underscores; the lite workflow uses the
+	// conventional hyphenated name. Keep both forms for existing releases.
+	return []string{
+		fmt.Sprintf("%s_%s", osName, arch),
+		fmt.Sprintf("%s-%s", osName, arch),
+	}
+}
+
+func detectDeploymentMode() string {
+	if mode := strings.ToLower(strings.TrimSpace(os.Getenv("SUB2API_DEPLOYMENT_MODE"))); mode == "docker" || mode == "binary" {
+		return mode
+	}
+	if _, err := os.Stat("/.dockerenv"); err == nil {
+		return "docker"
+	}
+	return "binary"
 }
 
 // validateDownloadURL checks if the URL is from an allowed domain
@@ -619,6 +657,7 @@ func (s *UpdateService) getFromCache(ctx context.Context) (*UpdateInfo, error) {
 		ReleaseInfo:    cached.ReleaseInfo,
 		Cached:         true,
 		BuildType:      s.buildType,
+		DeploymentMode: s.deploymentMode,
 	}, nil
 }
 

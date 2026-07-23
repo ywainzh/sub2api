@@ -5,6 +5,8 @@ package service
 import (
 	"context"
 	"errors"
+	"fmt"
+	"runtime"
 	"testing"
 	"time"
 
@@ -83,6 +85,34 @@ func TestUpdateServiceChecksForkReleases(t *testing.T) {
 	require.NoError(t, err)
 	require.True(t, info.HasUpdate)
 	require.Equal(t, "ywainzh/sub2api", client.lastRepo)
+}
+
+func TestUpdateServiceDetectsDeploymentMode(t *testing.T) {
+	t.Setenv("SUB2API_DEPLOYMENT_MODE", "docker")
+	require.Equal(t, "docker", detectDeploymentMode())
+
+	t.Setenv("SUB2API_DEPLOYMENT_MODE", "binary")
+	require.Equal(t, "binary", detectDeploymentMode())
+
+	t.Setenv("SUB2API_DEPLOYMENT_MODE", "unsupported")
+	mode := detectDeploymentMode()
+	require.Contains(t, []string{"docker", "binary"}, mode)
+}
+
+func TestUpdateServiceArchiveNamesSupportBothReleaseConventions(t *testing.T) {
+	names := (&UpdateService{}).getArchiveNames()
+	require.Len(t, names, 2)
+	require.Contains(t, names, fmt.Sprintf("%s_%s", runtime.GOOS, runtime.GOARCH))
+	require.Contains(t, names, fmt.Sprintf("%s-%s", runtime.GOOS, runtime.GOARCH))
+}
+
+func TestUpdateServiceRejectsInPlaceChangesForDocker(t *testing.T) {
+	t.Setenv("SUB2API_DEPLOYMENT_MODE", "docker")
+	svc := NewUpdateService(&updateServiceCacheStub{}, &updateServiceGitHubClientStub{}, "0.1.1", "release")
+
+	require.ErrorIs(t, svc.PerformUpdate(context.Background()), ErrDockerUpdateUnsupported)
+	require.ErrorIs(t, svc.Rollback(), ErrDockerUpdateUnsupported)
+	require.ErrorIs(t, svc.RollbackToVersion(context.Background(), "0.1.0"), ErrDockerUpdateUnsupported)
 }
 
 func newRollbackTestService(current string, releases []*GitHubRelease) *UpdateService {

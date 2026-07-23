@@ -54,6 +54,7 @@ export default {
     rollbackSourceHint: '源码构建不支持在线回退',
     deployScript: '脚本部署',
     deployDocker: 'Docker',
+    dockerUpdateHint: '当前是 Docker 部署，请在服务器执行以下命令更新镜像。',
     dockerEditCompose: '修改 docker-compose.yml 中的镜像版本',
     dockerRecreate: '重新创建容器'
   },

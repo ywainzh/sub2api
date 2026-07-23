@@ -175,6 +175,8 @@ curl -fsS -H 'Host: sub2api.zyspeed.xyz' http://127.0.0.1/health
 
 升级不会重新构建，不会删除数据目录。以 `v0.1.1` 为例：
 
+管理后台的版本菜单会识别 Docker 部署并显示当前目标版本的升级命令。Docker 部署不会在容器内替换二进制，因为容器重建后该修改会丢失；应始终通过固定 GHCR tag 拉取并重建应用容器。
+
 ```bash
 cd /opt/sub2api
 ./backup.sh

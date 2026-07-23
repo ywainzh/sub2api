@@ -55,6 +55,7 @@ export default {
     rollbackSourceHint: 'Online rollback is not available for source builds',
     deployScript: 'Script',
     deployDocker: 'Docker',
+    dockerUpdateHint: 'This is a Docker deployment. Run the following commands on the server to update the image.',
     dockerEditCompose: 'Edit the image tag in docker-compose.yml',
     dockerRecreate: 'Recreate the container'
   },

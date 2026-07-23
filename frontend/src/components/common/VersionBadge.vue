@@ -291,8 +291,69 @@
                 </div>
               </div>
 
-              <!-- Priority 4: Update available for release build - show update button -->
-              <div v-else-if="hasUpdate && isReleaseBuild" class="space-y-2">
+              <!-- Priority 4: Docker image update instructions -->
+              <div v-else-if="hasUpdate && isDockerDeployment" class="space-y-2">
+                <div
+                  class="flex items-center gap-3 rounded-lg border border-amber-200 bg-amber-50 p-3 dark:border-amber-800/50 dark:bg-amber-900/20"
+                >
+                  <div
+                    class="flex h-8 w-8 flex-shrink-0 items-center justify-center rounded-full bg-amber-100 dark:bg-amber-900/50"
+                  >
+                    <Icon
+                      name="download"
+                      size="sm"
+                      :stroke-width="2"
+                      class="text-amber-600 dark:text-amber-400"
+                    />
+                  </div>
+                  <div class="min-w-0 flex-1">
+                    <p class="text-sm font-medium text-amber-700 dark:text-amber-300">
+                      {{ t('version.updateAvailable') }}
+                    </p>
+                    <p class="text-xs text-amber-600/70 dark:text-amber-400/70">
+                      v{{ latestVersion }}
+                    </p>
+                  </div>
+                </div>
+
+                <div
+                  class="rounded-lg border border-blue-200 bg-blue-50 p-3 dark:border-blue-800/50 dark:bg-blue-900/20"
+                >
+                  <p class="mb-2 text-xs leading-4 text-blue-700 dark:text-blue-300">
+                    {{ t('version.dockerUpdateHint') }}
+                  </p>
+                  <div
+                    class="flex items-start gap-2 rounded-md border border-blue-200/70 bg-white/70 p-2 dark:border-blue-700/60 dark:bg-dark-900/30"
+                  >
+                    <code
+                      class="min-w-0 flex-1 whitespace-pre-wrap break-all text-[11px] leading-4 text-blue-800 dark:text-blue-200"
+                      >{{ dockerUpdateCommand }}</code
+                    >
+                    <button
+                      type="button"
+                      @click="copyToClipboard(dockerUpdateCommand)"
+                      class="flex-shrink-0 rounded p-1 text-blue-500 transition-colors hover:bg-blue-100 hover:text-blue-700 dark:hover:bg-blue-900/50 dark:hover:text-blue-200"
+                      :title="copied ? t('version.copied') : t('version.copyCommand')"
+                    >
+                      <Icon :name="copied ? 'check' : 'copy'" size="xs" :stroke-width="2" />
+                    </button>
+                  </div>
+                </div>
+
+                <a
+                  v-if="releaseInfo?.html_url && releaseInfo.html_url !== '#'"
+                  :href="releaseInfo.html_url"
+                  target="_blank"
+                  rel="noopener noreferrer"
+                  class="flex items-center justify-center gap-1 text-xs text-gray-500 transition-colors hover:text-gray-700 dark:text-dark-400 dark:hover:text-dark-200"
+                >
+                  {{ t('version.viewChangelog') }}
+                  <Icon name="externalLink" size="xs" :stroke-width="2" />
+                </a>
+              </div>
+
+              <!-- Priority 5: Update available for a standalone release binary -->
+              <div v-else-if="hasUpdate && isReleaseBuild && !isDockerDeployment" class="space-y-2">
                 <!-- Update info card -->
                 <div
                   class="flex items-center gap-3 rounded-lg border border-amber-200 bg-amber-50 p-3 dark:border-amber-800/50 dark:bg-amber-900/20"
@@ -680,6 +741,7 @@ const latestVersion = computed(() => displayVersion(appStore.latestVersion))
 const hasUpdate = computed(() => appStore.hasUpdate)
 const releaseInfo = computed(() => appStore.releaseInfo)
 const buildType = computed(() => appStore.buildType)
+const deploymentMode = computed(() => appStore.deploymentMode)
 
 // Update process states (local to this component)
 const updating = ref(false)
@@ -735,6 +797,17 @@ const activeManualCommand = computed(() =>
 
 // Only show update check for release builds (binary/docker deployment)
 const isReleaseBuild = computed(() => buildType.value === 'release')
+const isDockerDeployment = computed(() => deploymentMode.value === 'docker')
+const dockerUpdateCommand = computed(() => {
+  if (!latestVersion.value) return ''
+  return [
+    'cd /opt/sub2api',
+    './backup.sh',
+    `sed -i 's#^APP_IMAGE=.*#APP_IMAGE=${DOCKER_IMAGE}:v${latestVersion.value}#' .env`,
+    'docker compose pull',
+    'docker compose up -d'
+  ].join('\n')
+})
 
 function toggleDropdown() {
   dropdownOpen.value = !dropdownOpen.value
