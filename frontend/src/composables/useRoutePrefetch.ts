@@ -21,17 +21,15 @@ type ComponentImportFn = () => Promise<unknown>
  */
 const PREFETCH_ADJACENCY: Record<string, string[]> = {
   // Admin routes - 预加载最常访问的相邻页面
-  '/admin/dashboard': ['/admin/accounts', '/admin/users'],
-  '/admin/accounts': ['/admin/accounts/status-check', '/admin/dashboard', '/admin/users'],
+  '/admin/dashboard': ['/admin/accounts', '/admin/groups'],
+  '/admin/accounts': ['/admin/accounts/status-check', '/admin/dashboard', '/admin/groups'],
   '/admin/accounts/status-check': ['/admin/accounts', '/admin/dashboard'],
-  '/admin/users': ['/admin/groups', '/admin/dashboard'],
-  '/admin/groups': ['/admin/subscriptions', '/admin/users'],
-  '/admin/subscriptions': ['/admin/groups', '/admin/redeem'],
+  '/admin/groups': ['/admin/subscriptions', '/admin/dashboard'],
+  '/admin/subscriptions': ['/admin/groups'],
   // User routes
   '/dashboard': ['/keys', '/usage'],
   '/keys': ['/dashboard', '/usage'],
-  '/usage': ['/keys', '/redeem'],
-  '/redeem': ['/usage', '/profile'],
+  '/usage': ['/keys', '/profile'],
   '/profile': ['/dashboard', '/keys']
 }
 

@@ -8,6 +8,12 @@ const componentPath = resolve(dirname(fileURLToPath(import.meta.url)), '../AppSi
 const componentSource = readFileSync(componentPath, 'utf8')
 const stylePath = resolve(dirname(fileURLToPath(import.meta.url)), '../../../style.css')
 const styleSource = readFileSync(stylePath, 'utf8')
+const appPath = resolve(dirname(fileURLToPath(import.meta.url)), '../../../App.vue')
+const appSource = readFileSync(appPath, 'utf8')
+const headerPath = resolve(dirname(fileURLToPath(import.meta.url)), '../AppHeader.vue')
+const headerSource = readFileSync(headerPath, 'utf8')
+const routerPath = resolve(dirname(fileURLToPath(import.meta.url)), '../../../router/index.ts')
+const routerSource = readFileSync(routerPath, 'utf8')
 
 describe('AppSidebar custom SVG styles', () => {
   it('does not override uploaded SVG fill or stroke colors', () => {
@@ -51,5 +57,34 @@ describe('AppSidebar header styles', () => {
     expect(sidebarBrandBlockMatch).not.toBeNull()
     expect(sidebarHeaderBlockMatch?.[0]).not.toContain('@apply overflow-hidden;')
     expect(sidebarBrandBlockMatch?.[0]).not.toContain('overflow: hidden;')
+  })
+})
+
+describe('single-user navigation', () => {
+  it('removes unused admin management pages', () => {
+    expect(componentSource).not.toContain("{ path: '/admin/users'")
+    expect(componentSource).not.toContain("{ path: '/admin/announcements'")
+    expect(componentSource).not.toContain("{ path: '/admin/promo-codes'")
+
+    expect(routerSource).not.toContain("path: '/admin/users'")
+    expect(routerSource).not.toContain("path: '/admin/announcements'")
+    expect(routerSource).not.toContain("path: '/admin/promo-codes'")
+  })
+
+  it('keeps only the admin usage entry for administrators', () => {
+    expect(componentSource).toContain("{ path: '/admin/usage'")
+    expect(componentSource).toContain("filter((item) => item.path !== '/usage')")
+  })
+
+  it('removes personal subscription and redeem entries', () => {
+    expect(componentSource).not.toContain("{ path: '/subscriptions'")
+    expect(componentSource).not.toContain("{ path: '/redeem'")
+  })
+
+  it('disables announcement and subscription chrome', () => {
+    expect(appSource).not.toContain('AnnouncementPopup')
+    expect(appSource).not.toContain('useAnnouncementStore')
+    expect(headerSource).not.toContain('AnnouncementBell')
+    expect(headerSource).not.toContain('SubscriptionProgressMini')
   })
 })
