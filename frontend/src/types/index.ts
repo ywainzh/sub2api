@@ -586,6 +586,7 @@ export interface AdminGroup extends Group {
 
 export interface ModelsListConfig {
   enabled: boolean
+  enforce: boolean
   models: string[]
 }
 

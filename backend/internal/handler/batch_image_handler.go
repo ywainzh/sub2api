@@ -1,6 +1,7 @@
 package handler
 
 import (
+	"bytes"
 	"encoding/json"
 	"errors"
 	"io"
@@ -14,6 +15,7 @@ import (
 	"github.com/Wei-Shaw/sub2api/internal/service"
 
 	"github.com/gin-gonic/gin"
+	"github.com/tidwall/gjson"
 	"go.uber.org/zap"
 )
 
@@ -29,6 +31,28 @@ func NewBatchImageHandler(service *service.BatchImagePublicService, download *se
 }
 
 func (h *BatchImageHandler) Submit(c *gin.Context) {
+	apiKey, hasAPIKey := middleware.GetAPIKeyFromContext(c)
+	if hasAPIKey && apiKey != nil && apiKey.Group != nil && apiKey.Group.ModelWhitelistEnabled() {
+		// Inspect the raw JSON model before binding it into a Go string. The
+		// standard binder rejects numeric/boolean model values first, which would
+		// otherwise hide the stable model_not_allowed error required by strict
+		// groups. Invalid JSON is still left to ShouldBindJSON below.
+		rawBody, readErr := io.ReadAll(c.Request.Body)
+		c.Request.Body = io.NopCloser(bytes.NewReader(rawBody))
+		if readErr == nil {
+			if gjson.ValidBytes(rawBody) {
+				modelResult := gjson.GetBytes(rawBody, "model")
+				requestedModel := ""
+				if modelResult.Exists() && modelResult.Type == gjson.String {
+					requestedModel = strings.TrimSpace(modelResult.String())
+				}
+				if modelErr := service.ValidateOpenAIGroupModelPayload(apiKey.Group, rawBody, "model", requestedModel); modelErr != nil {
+					batchImageError(c, modelErr)
+					return
+				}
+			}
+		}
+	}
 	var req service.BatchImageSubmitRequest
 	if err := c.ShouldBindJSON(&req); err != nil {
 		batchImageError(c, service.ErrBatchImageInvalidItems)
@@ -38,6 +62,12 @@ func (h *BatchImageHandler) Submit(c *gin.Context) {
 	if !ok {
 		batchImageError(c, infraerrors.New(http.StatusUnauthorized, "API_KEY_REQUIRED", "API key is required"))
 		return
+	}
+	if hasAPIKey && apiKey != nil {
+		if modelErr := service.ValidateOpenAIGroupModel(apiKey.Group, req.Model); modelErr != nil {
+			batchImageError(c, modelErr)
+			return
+		}
 	}
 	if !h.checkSecurityAuditBeforeSubmit(c, &req) {
 		return
@@ -135,6 +165,15 @@ func (h *BatchImageHandler) Models(c *gin.Context) {
 	if err != nil {
 		batchImageError(c, err)
 		return
+	}
+	if apiKey, exists := middleware.GetAPIKeyFromContext(c); exists && apiKey != nil && apiKey.Group != nil && apiKey.Group.ModelWhitelistEnabled() {
+		filtered := make([]service.BatchImagePublicModel, 0, len(got.Data))
+		for _, model := range got.Data {
+			if apiKey.Group.IsModelAllowed(model.ID) {
+				filtered = append(filtered, model)
+			}
+		}
+		got.Data = filtered
 	}
 	c.JSON(http.StatusOK, got)
 }

@@ -92,8 +92,21 @@ func (h *AsyncImageHandler) Submit(c *gin.Context) {
 		imageTaskJSONError(c, http.StatusBadRequest, "invalid_request_error", "streaming image requests cannot be submitted as asynchronous tasks")
 		return
 	}
-	if err := h.validateRequest(c, platform, body); err != nil {
+	requestModel, explicitModel, err := h.validateRequestForGroup(c, platform, body, apiKey.Group)
+	if err != nil {
+		if infraerrors.Reason(err) == service.ModelNotAllowedErrorCode {
+			imageTaskError(c, err)
+			return
+		}
 		imageTaskJSONError(c, http.StatusBadRequest, "invalid_request_error", err.Error())
+		return
+	}
+	whitelistModel := requestModel
+	if apiKey.Group != nil && apiKey.Group.ModelWhitelistEnabled() && !explicitModel {
+		whitelistModel = ""
+	}
+	if modelErr := service.ValidateOpenAIGroupModel(apiKey.Group, whitelistModel); modelErr != nil {
+		imageTaskError(c, modelErr)
 		return
 	}
 	if !h.checkSecurityAuditBeforeSubmit(c, apiKey, platform, body) {
@@ -101,7 +114,13 @@ func (h *AsyncImageHandler) Submit(c *gin.Context) {
 	}
 
 	taskCtx, recorder, cancel := newAsyncImageContext(c, body, h.tasks.ExecutionTimeout())
-	task, err := h.tasks.Create(c.Request.Context(), service.ImageTaskOwner{UserID: apiKey.UserID, APIKeyID: apiKey.ID})
+	owner := service.ImageTaskOwner{UserID: apiKey.UserID, APIKeyID: apiKey.ID}
+	var task *service.ImageTask
+	if apiKey.Group != nil && apiKey.Group.ModelWhitelistEnabled() {
+		task, err = h.tasks.CreateForGroup(c.Request.Context(), owner, apiKey.Group, whitelistModel)
+	} else {
+		task, err = h.tasks.Create(c.Request.Context(), owner)
+	}
 	if err != nil {
 		cancel()
 		imageTaskError(c, err)
@@ -187,25 +206,33 @@ func (h *AsyncImageHandler) Get(c *gin.Context) {
 	c.JSON(http.StatusOK, task)
 }
 
+// validateRequest keeps the legacy helper signature for internal callers and
+// tests; request submission uses validateRequestForGroup so strict group
+// validation happens before image-model capability checks.
 func (h *AsyncImageHandler) validateRequest(c *gin.Context, platform string, body []byte) error {
+	_, _, err := h.validateRequestForGroup(c, platform, body, nil)
+	return err
+}
+
+func (h *AsyncImageHandler) validateRequestForGroup(c *gin.Context, platform string, body []byte, group *service.Group) (string, bool, error) {
 	if h.openAI == nil || h.openAI.gatewayService == nil {
-		return nil
+		return "", false, nil
 	}
 	if platform == service.PlatformGrok {
 		parsed := service.ParseGrokMediaRequest(c.GetHeader("Content-Type"), body)
 		if strings.TrimSpace(parsed.Model) == "" {
-			return errors.New("model is required")
+			return "", false, errors.New("model is required")
 		}
-		return nil
+		return parsed.Model, true, nil
 	}
-	parsed, err := h.openAI.gatewayService.ParseOpenAIImagesRequest(c, body)
+	parsed, err := h.openAI.gatewayService.ParseOpenAIImagesRequestForGroup(c, body, group)
 	if err != nil {
-		return err
+		return "", false, err
 	}
 	if parsed.Stream {
-		return errors.New("streaming image requests cannot be submitted as asynchronous tasks")
+		return "", false, errors.New("streaming image requests cannot be submitted as asynchronous tasks")
 	}
-	return nil
+	return parsed.Model, parsed.ExplicitModel, nil
 }
 
 func (h *AsyncImageHandler) executeWithGateway(platform string, c *gin.Context) {
@@ -322,10 +349,18 @@ func imageTaskError(c *gin.Context, err error) {
 	if strings.TrimSpace(code) == "" {
 		code = "IMAGE_TASK_ERROR"
 	}
-	imageTaskJSONError(c, status, code, message)
+	errorType := code
+	if code == service.ModelNotAllowedErrorCode {
+		errorType = "invalid_request_error"
+	}
+	imageTaskJSONErrorWithType(c, status, errorType, code, message)
 }
 
 func imageTaskJSONError(c *gin.Context, status int, code, message string) {
+	imageTaskJSONErrorWithType(c, status, code, code, message)
+}
+
+func imageTaskJSONErrorWithType(c *gin.Context, status int, errorType, code, message string) {
 	c.Header("Cache-Control", "no-store")
-	c.JSON(status, gin.H{"error": gin.H{"type": code, "code": code, "message": message}})
+	c.JSON(status, gin.H{"error": gin.H{"type": errorType, "code": code, "message": message}})
 }

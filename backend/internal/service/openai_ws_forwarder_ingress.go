@@ -125,6 +125,8 @@ func (s *OpenAIGatewayService) ProxyResponsesWebSocketFromClient(
 	isCodexCLI := openai.IsCodexOfficialClientByHeaders(c.GetHeader("User-Agent"), c.GetHeader("originator")) || (s.cfg != nil && s.cfg.Gateway.ForceCodexCLI)
 
 	type openAIWSClientPayload struct {
+		eventType          string
+		control            bool
 		payloadRaw         []byte
 		rawForHash         []byte
 		promptCacheKey     string
@@ -151,6 +153,13 @@ func (s *OpenAIGatewayService) ProxyResponsesWebSocketFromClient(
 		switch path {
 		case "type", "model":
 			payload[path] = value
+		case "session.model":
+			session, ok := payload["session"].(map[string]any)
+			if !ok || session == nil {
+				session = make(map[string]any)
+				payload["session"] = session
+			}
+			session["model"] = value
 		case "client_metadata." + openAIWSTurnMetadataHeader:
 			setOpenAIWSTurnMetadata(payload, fmt.Sprintf("%v", value))
 		default:
@@ -163,7 +172,7 @@ func (s *OpenAIGatewayService) ProxyResponsesWebSocketFromClient(
 		return rebuilt, nil
 	}
 
-	parseClientPayload := func(raw []byte) (openAIWSClientPayload, error) {
+	parseClientPayload := func(raw []byte, turn int) (openAIWSClientPayload, error) {
 		trimmed := bytes.TrimSpace(raw)
 		if len(trimmed) == 0 {
 			return openAIWSClientPayload{}, NewOpenAIWSClientCloseError(coderws.StatusPolicyViolation, "empty websocket request payload", nil)
@@ -172,8 +181,18 @@ func (s *OpenAIGatewayService) ProxyResponsesWebSocketFromClient(
 			return openAIWSClientPayload{}, NewOpenAIWSClientCloseError(coderws.StatusPolicyViolation, "invalid websocket request payload", errors.New("invalid json"))
 		}
 
-		values := gjson.GetManyBytes(trimmed, "type", "model", "prompt_cache_key", "previous_response_id")
-		eventType := strings.TrimSpace(values[0].String())
+		typeResult := gjson.GetBytes(trimmed, "type")
+		eventType := ""
+		if typeResult.Exists() {
+			if typeResult.Type != gjson.String {
+				return openAIWSClientPayload{}, NewOpenAIWSClientCloseError(
+					coderws.StatusPolicyViolation,
+					"websocket event type must be a string",
+					errors.New("websocket event type must be a string"),
+				)
+			}
+			eventType = strings.TrimSpace(typeResult.String())
+		}
 		normalized := trimmed
 		switch eventType {
 		case "":
@@ -184,6 +203,7 @@ func (s *OpenAIGatewayService) ProxyResponsesWebSocketFromClient(
 			}
 			normalized = next
 		case "response.create":
+		case "session.update":
 		case "response.append":
 			return openAIWSClientPayload{}, NewOpenAIWSClientCloseError(
 				coderws.StatusPolicyViolation,
@@ -197,18 +217,100 @@ func (s *OpenAIGatewayService) ProxyResponsesWebSocketFromClient(
 				nil,
 			)
 		}
+
+		// session.update is a control frame, not a billable response turn.  It
+		// may rotate the session-level model used by later response.create
+		// frames, but it must never enter account scheduling, usage accounting,
+		// image handling, or the HTTP bridge turn loop.  The actual upstream
+		// session is intentionally left untouched in the legacy ctx-pool/
+		// http-bridge paths; the passthrough adapter forwards its control frames
+		// directly and applies the same whitelist hook there.
+		if eventType == "session.update" {
+			sessionModelResult := gjson.GetBytes(trimmed, "session.model")
+			originalModel := ""
+			if sessionModelResult.Exists() {
+				if sessionModelResult.Type != gjson.String || strings.TrimSpace(sessionModelResult.String()) == "" {
+					if hooks != nil && hooks.BeforeRequest != nil && turn > 1 {
+						if err := hooks.BeforeRequest(turn, trimmed, ""); err != nil {
+							return openAIWSClientPayload{}, err
+						}
+					}
+					return openAIWSClientPayload{}, NewOpenAIWSClientCloseError(
+						coderws.StatusPolicyViolation,
+						"session.model must be a non-empty string",
+						nil,
+					)
+				}
+				originalModel = strings.TrimSpace(sessionModelResult.String())
+				if hooks != nil && hooks.BeforeRequest != nil && turn > 1 {
+					if err := hooks.BeforeRequest(turn, trimmed, originalModel); err != nil {
+						return openAIWSClientPayload{}, err
+					}
+				}
+				upstreamModel := normalizeOpenAIModelForUpstream(account, account.GetMappedModel(originalModel))
+				if upstreamModel != "" && upstreamModel != originalModel {
+					mapped, setErr := applyPayloadMutation(normalized, "session.model", upstreamModel)
+					if setErr != nil {
+						return openAIWSClientPayload{}, NewOpenAIWSClientCloseError(
+							coderws.StatusPolicyViolation,
+							"invalid websocket request payload",
+							setErr,
+						)
+					}
+					normalized = mapped
+				}
+				ingressSessionOriginalModel = originalModel
+			}
+			if turn == 1 {
+				return openAIWSClientPayload{}, NewOpenAIWSClientCloseError(
+					coderws.StatusPolicyViolation,
+					"first websocket message must be response.create",
+					nil,
+				)
+			}
+			return openAIWSClientPayload{
+				eventType:     eventType,
+				control:       true,
+				payloadRaw:    normalized,
+				rawForHash:    trimmed,
+				originalModel: originalModel,
+				payloadBytes:  len(normalized),
+			}, nil
+		}
+
+		values := gjson.GetManyBytes(trimmed, "model", "prompt_cache_key", "previous_response_id")
 		if hooks != nil && (hooks.MaxReasoningEffort != "" || len(hooks.ReasoningEffortMappings) > 0) {
 			if capped, changed := ApplyOpenAIReasoningEffortPolicy(normalized, hooks.MaxReasoningEffort, hooks.ReasoningEffortMappings); changed {
 				normalized = capped
 			}
 		}
 
-		originalModel := strings.TrimSpace(values[1].String())
-		modelMissing := originalModel == ""
-		if originalModel == "" {
+		modelResult := values[0]
+		modelPresent := modelResult.Exists()
+		modelMissing := !modelPresent
+		originalModel := ""
+		if modelPresent {
+			if modelResult.Type != gjson.String || strings.TrimSpace(modelResult.String()) == "" {
+				// An explicitly empty/non-string model must not be treated as an
+				// omitted field and silently inherit the first turn's model. Give
+				// strict-group hooks a chance to emit the stable model_not_allowed
+				// event; non-strict groups receive the regular protocol error.
+				if turn > 1 && hooks != nil && hooks.BeforeRequest != nil {
+					if err := hooks.BeforeRequest(turn, trimmed, ""); err != nil {
+						return openAIWSClientPayload{}, err
+					}
+				}
+				return openAIWSClientPayload{}, NewOpenAIWSClientCloseError(
+					coderws.StatusPolicyViolation,
+					"model must be a non-empty string",
+					nil,
+				)
+			}
+			originalModel = strings.TrimSpace(modelResult.String())
+		} else {
 			// 入站 WS 长会话里，部分客户端只在第一轮 response.create 上声明
 			// model，后续 turn 复用同一 session-level model。为避免因省略
-			// model 直接断开用户连接，这里回落到上一轮已通过校验的客户端模型，
+			// model 直接断开用户连接，这里回落到首轮已通过校验的客户端模型，
 			// 并在下方写回上游 payload，保证账号模型映射/fast policy/图片权限
 			// 仍按同一模型执行。
 			originalModel = ingressSessionOriginalModel
@@ -220,8 +322,17 @@ func (s *OpenAIGatewayService) ProxyResponsesWebSocketFromClient(
 				)
 			}
 		}
-		promptCacheKey := strings.TrimSpace(values[2].String())
-		previousResponseID := strings.TrimSpace(values[3].String())
+		// Validate follow-up turns while the payload still contains the
+		// client-supplied model. Do this before account mapping, image-policy
+		// normalization, or any other ingress transformation so a strict group
+		// allowlist cannot be bypassed by an upstream model alias.
+		if turn > 1 && hooks != nil && hooks.BeforeRequest != nil {
+			if err := hooks.BeforeRequest(turn, trimmed, originalModel); err != nil {
+				return openAIWSClientPayload{}, err
+			}
+		}
+		promptCacheKey := strings.TrimSpace(values[1].String())
+		previousResponseID := strings.TrimSpace(values[2].String())
 		previousResponseIDKind := ClassifyOpenAIPreviousResponseIDKind(previousResponseID)
 		if previousResponseID != "" && previousResponseIDKind == OpenAIPreviousResponseIDKindMessageID {
 			return openAIWSClientPayload{}, NewOpenAIWSClientCloseError(
@@ -365,9 +476,12 @@ func (s *OpenAIGatewayService) ProxyResponsesWebSocketFromClient(
 			)
 		}
 		normalized = policyApplied
-		ingressSessionOriginalModel = originalModel
+		if ingressSessionOriginalModel == "" {
+			ingressSessionOriginalModel = originalModel
+		}
 
 		return openAIWSClientPayload{
+			eventType:          eventType,
 			payloadRaw:         normalized,
 			rawForHash:         trimmed,
 			promptCacheKey:     promptCacheKey,
@@ -412,7 +526,7 @@ func (s *OpenAIGatewayService) ProxyResponsesWebSocketFromClient(
 		return payload, nil
 	}
 
-	firstPayload, err := parseClientPayload(firstClientMessage)
+	firstPayload, err := parseClientPayload(firstClientMessage, 1)
 	if err != nil {
 		return err
 	}
@@ -466,10 +580,23 @@ func (s *OpenAIGatewayService) ProxyResponsesWebSocketFromClient(
 		var bridgeReplayInput []json.RawMessage
 		bridgeReplayInputExists := false
 		for turn := 1; ; turn++ {
-			if turn > 1 && hooks != nil && hooks.BeforeRequest != nil {
-				if err := hooks.BeforeRequest(turn, currentBridgePayload.payloadRaw, currentBridgePayload.originalModel); err != nil {
-					return err
+			// Drain session.update control frames locally. They may change
+			// ingressSessionOriginalModel (done by parseClientPayload), but do
+			// not represent a billable HTTP Responses turn and therefore must
+			// not acquire/schedule/charge another request.
+			for currentBridgePayload.control {
+				nextClientMessage, readErr := readClientMessage()
+				if readErr != nil {
+					if isOpenAIWSClientDisconnectError(readErr) {
+						return nil
+					}
+					return fmt.Errorf("read client websocket control frame: %w", readErr)
 				}
+				nextPayload, parseErr := parseClientPayload(nextClientMessage, turn+1)
+				if parseErr != nil {
+					return parseErr
+				}
+				currentBridgePayload = nextPayload
 			}
 			if hooks != nil && hooks.BeforeTurn != nil {
 				if err := hooks.BeforeTurn(turn); err != nil {
@@ -573,7 +700,7 @@ func (s *OpenAIGatewayService) ProxyResponsesWebSocketFromClient(
 				}
 				return fmt.Errorf("read client websocket request: %w", readErr)
 			}
-			nextPayload, parseErr := parseClientPayload(nextClientMessage)
+			nextPayload, parseErr := parseClientPayload(nextClientMessage, turn+1)
 			if parseErr != nil {
 				return parseErr
 			}
@@ -1202,11 +1329,6 @@ func (s *OpenAIGatewayService) ProxyResponsesWebSocketFromClient(
 		return true
 	}
 	for {
-		if turn > 1 && !skipBeforeTurn && hooks != nil && hooks.BeforeRequest != nil {
-			if err := hooks.BeforeRequest(turn, currentPayload, currentOriginalModel); err != nil {
-				return err
-			}
-		}
 		if !skipBeforeTurn && hooks != nil && hooks.BeforeTurn != nil {
 			if err := hooks.BeforeTurn(turn); err != nil {
 				return err
@@ -1589,9 +1711,25 @@ func (s *OpenAIGatewayService) ProxyResponsesWebSocketFromClient(
 			return fmt.Errorf("read client websocket request: %w", readErr)
 		}
 
-		nextPayload, parseErr := parseClientPayload(nextClientMessage)
+		nextPayload, parseErr := parseClientPayload(nextClientMessage, turn+1)
 		if parseErr != nil {
 			return parseErr
+		}
+		// session.update frames are control-only in ctx-pool mode. Consume any
+		// consecutive controls before advancing the logical response turn so
+		// they cannot trigger another account slot or usage callback.
+		for nextPayload.control {
+			nextClientMessage, readErr = readClientMessage()
+			if readErr != nil {
+				if isOpenAIWSClientDisconnectError(readErr) {
+					return nil
+				}
+				return fmt.Errorf("read client websocket control frame: %w", readErr)
+			}
+			nextPayload, parseErr = parseClientPayload(nextClientMessage, turn+1)
+			if parseErr != nil {
+				return parseErr
+			}
 		}
 		if nextPayload.promptCacheKey != "" {
 			// ingress 会话在整个客户端 WS 生命周期内复用同一上游连接；

@@ -230,6 +230,136 @@ func TestGatewayModels_CustomModelsListDisabledKeepsOriginalModels(t *testing.T)
 	require.Equal(t, []string{"gpt-5.4", "gpt-5.5"}, modelIDsForTest(got.Data))
 }
 
+func TestGatewayModels_StrictWhitelistFiltersEvenWhenDisplaySwitchIsDisabled(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+
+	groupID := int64(2201)
+	h := newGatewayModelsHandlerForTest(&gatewayModelsAccountRepoStub{
+		byGroup: map[int64][]service.Account{
+			groupID: {
+				{
+					ID:       1,
+					Platform: service.PlatformOpenAI,
+					Credentials: map[string]any{
+						"model_mapping": map[string]any{"gpt-*": "upstream-model"},
+					},
+				},
+			},
+		},
+	})
+
+	rec := httptest.NewRecorder()
+	c, _ := gin.CreateTestContext(rec)
+	c.Request = httptest.NewRequest(http.MethodGet, "/v1/models", nil)
+	c.Set(string(middleware2.ContextKeyAPIKey), &service.APIKey{Group: &service.Group{
+		ID:       groupID,
+		Platform: service.PlatformOpenAI,
+		ModelsListConfig: service.GroupModelsListConfig{
+			Enabled: false,
+			Enforce: true,
+			Models:  []string{"gpt-5.6-terra"},
+		},
+	}})
+
+	h.Models(c)
+
+	require.Equal(t, http.StatusOK, rec.Code)
+	var got gatewayModelsResponseForTest
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &got))
+	require.Equal(t, []string{"gpt-5.6-terra"}, modelIDsForTest(got.Data))
+}
+
+func TestGatewayModels_StrictWhitelistKeepsEnabledDisplayOrdering(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+
+	groupID := int64(2203)
+	h := newGatewayModelsHandlerForTest(&gatewayModelsAccountRepoStub{})
+	rec := httptest.NewRecorder()
+	c, _ := gin.CreateTestContext(rec)
+	c.Request = httptest.NewRequest(http.MethodGet, "/v1/models", nil)
+	c.Set(string(middleware2.ContextKeyAPIKey), &service.APIKey{Group: &service.Group{
+		ID:       groupID,
+		Platform: service.PlatformOpenAI,
+		ModelsListConfig: service.GroupModelsListConfig{
+			Enabled: true,
+			Enforce: true,
+			Models:  []string{"gpt-5.6-terra", "gpt-5.4"},
+		},
+	}})
+
+	h.Models(c)
+
+	require.Equal(t, http.StatusOK, rec.Code)
+	var got gatewayModelsResponseForTest
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &got))
+	require.Equal(t, []string{"gpt-5.6-terra", "gpt-5.4"}, modelIDsForTest(got.Data))
+}
+
+func TestGatewayModels_StrictWhitelistEnabledDisplayMatchesCaseInsensitively(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+
+	groupID := int64(2204)
+	h := newGatewayModelsHandlerForTest(&gatewayModelsAccountRepoStub{
+		byGroup: map[int64][]service.Account{
+			groupID: {
+				{
+					ID:       1,
+					Platform: service.PlatformOpenAI,
+					Credentials: map[string]any{
+						"model_mapping": map[string]any{"gpt-5.6-terra": "upstream-model"},
+					},
+				},
+			},
+		},
+	})
+	rec := httptest.NewRecorder()
+	c, _ := gin.CreateTestContext(rec)
+	c.Request = httptest.NewRequest(http.MethodGet, "/v1/models", nil)
+	c.Set(string(middleware2.ContextKeyAPIKey), &service.APIKey{Group: &service.Group{
+		ID:       groupID,
+		Platform: service.PlatformOpenAI,
+		ModelsListConfig: service.GroupModelsListConfig{
+			Enabled: true,
+			Enforce: true,
+			Models:  []string{"GPT-5.6-TERRA"},
+		},
+	}})
+
+	h.Models(c)
+
+	require.Equal(t, http.StatusOK, rec.Code)
+	var got gatewayModelsResponseForTest
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &got))
+	require.Equal(t, []string{"GPT-5.6-TERRA"}, modelIDsForTest(got.Data))
+}
+
+func TestGatewayModels_StrictEmptyWhitelistReturnsEmptyList(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	h := newGatewayModelsHandlerForTest(&gatewayModelsAccountRepoStub{})
+
+	rec := httptest.NewRecorder()
+	c, _ := gin.CreateTestContext(rec)
+	c.Request = httptest.NewRequest(http.MethodGet, "/v1/models", nil)
+	c.Set(string(middleware2.ContextKeyAPIKey), &service.APIKey{Group: &service.Group{
+		ID:               2202,
+		Platform:         service.PlatformOpenAI,
+		ModelsListConfig: service.GroupModelsListConfig{Enforce: true},
+	}})
+
+	h.Models(c)
+
+	require.Equal(t, http.StatusOK, rec.Code)
+	var got gatewayModelsResponseForTest
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &got))
+	require.Empty(t, got.Data)
+}
+
+func TestCustomModelsListAllowsModel_LegacyComparisonRemainsCaseSensitive(t *testing.T) {
+	require.True(t, customModelsListAllowsModel([]string{"gpt-5.6-terra"}, "gpt-5.6-terra"))
+	require.False(t, customModelsListAllowsModel([]string{"gpt-5.6-terra"}, "GPT-5.6-TERRA"))
+	require.True(t, strictCustomModelsListAllowsModel([]string{"gpt-5.6-terra"}, "GPT-5.6-TERRA"))
+}
+
 func TestGatewayModels_CustomModelsListFiltersAndOrdersMappedModels(t *testing.T) {
 	gin.SetMode(gin.TestMode)
 

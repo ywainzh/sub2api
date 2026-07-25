@@ -426,6 +426,31 @@ func TestBatchImagePublicService_Submit(t *testing.T) {
 	})
 }
 
+func TestBatchImagePublicService_StrictGroupRejectsBeforeAnyBatchSideEffect(t *testing.T) {
+	svc, repo, queue, gemini, _ := newTestBatchImagePublicService(true)
+	groupID := int64(901)
+	svc.GroupRepo = &publicBatchImageGroupRepo{groups: map[int64]*Group{
+		groupID: {
+			ID:       groupID,
+			Platform: PlatformOpenAI,
+			ModelsListConfig: GroupModelsListConfig{
+				Enforce: true,
+				Models:  []string{"gpt-image-1"},
+			},
+		},
+	}}
+
+	req := validBatchImageSubmitRequest()
+	req.Model = "gpt-image-2"
+	_, err := svc.Submit(context.Background(), BatchImageOwner{UserID: 11, APIKeyID: 22, GroupID: &groupID}, req, "idem-key")
+
+	require.Equal(t, ModelNotAllowedErrorCode, infraerrors.Reason(err))
+	require.Empty(t, repo.jobs)
+	require.Empty(t, queue.enqueued)
+	require.Empty(t, gemini.submits)
+	require.Empty(t, svc.BillingRepo.(*fakeBatchImageBillingRepo).reserves)
+}
+
 func TestBatchImagePublicService_List(t *testing.T) {
 	ctx := context.Background()
 	svc, repo, _, _, _ := newTestBatchImagePublicService(true)

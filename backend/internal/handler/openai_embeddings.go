@@ -67,10 +67,16 @@ func (h *OpenAIGatewayHandler) Embeddings(c *gin.Context) {
 
 	modelResult := gjson.GetBytes(body, "model")
 	if !modelResult.Exists() || modelResult.Type != gjson.String || strings.TrimSpace(modelResult.String()) == "" {
+		if h.rejectOpenAIGroupModelPayload(c, apiKey, body, "model", "") {
+			return
+		}
 		h.errorResponse(c, http.StatusBadRequest, "invalid_request_error", "model is required")
 		return
 	}
 	reqModel := modelResult.String()
+	if h.rejectOpenAIGroupModelPayload(c, apiKey, body, "model", reqModel) {
+		return
+	}
 	reqLog = reqLog.With(zap.String("model", reqModel))
 	setOpsRequestContext(c, reqModel, false)
 	setOpsEndpointContext(c, "", int16(service.RequestTypeSync))

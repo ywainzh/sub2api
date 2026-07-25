@@ -3,6 +3,7 @@ package handler
 import (
 	"net/http"
 	"strconv"
+	"strings"
 	"time"
 
 	"github.com/Wei-Shaw/sub2api/internal/domain"
@@ -10,6 +11,7 @@ import (
 	"github.com/Wei-Shaw/sub2api/internal/service"
 
 	"github.com/gin-gonic/gin"
+	"github.com/tidwall/gjson"
 	"go.uber.org/zap"
 )
 
@@ -102,6 +104,24 @@ func (h *OpenAIGatewayHandler) CountTokens(c *gin.Context) {
 		return
 	}
 
+	// Validate the client-supplied model before ParseGatewayRequest performs any
+	// protocol-specific normalization (for example Claude Code's long-context
+	// suffix stripping). Only an actual JSON string is recognizable: gjson's
+	// String method also renders numbers and booleans as text, which must not be
+	// able to match a strict allowlist entry.
+	rawRequestedModel := ""
+	modelResult := gjson.GetBytes(body, "model")
+	if modelResult.Exists() && modelResult.Type == gjson.String {
+		rawRequestedModel = strings.TrimSpace(modelResult.String())
+	}
+	// Preserve the normal malformed-JSON envelope. For syntactically valid
+	// JSON, however, a missing/non-string model must fail closed in strict mode
+	// before the protocol parser can normalize or reject it differently.
+	if gjson.ValidBytes(body) {
+		if h.rejectAnthropicOpenAIGroupModelPayload(c, apiKey, body, "model", rawRequestedModel) {
+			return
+		}
+	}
 	bodyRef := service.NewRequestBodyRef(body)
 	parsedReq, err := service.ParseGatewayRequest(bodyRef, domain.PlatformAnthropic)
 	if err != nil {

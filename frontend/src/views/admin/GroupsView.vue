@@ -741,7 +741,7 @@
 
         <div class="border-t pt-4">
           <div class="mb-3 flex items-center justify-between gap-3">
-            <div>
+            <div class="min-w-0">
               <label class="text-sm font-medium text-gray-700 dark:text-gray-300">
                 {{ t("admin.groups.modelsList.title") }}
               </label>
@@ -751,9 +751,12 @@
             </div>
             <button
               type="button"
+              role="switch"
+              :aria-checked="createModelsListState.enabled"
+              :aria-label="t('admin.groups.modelsList.title')"
               @click="createModelsListState.enabled = !createModelsListState.enabled"
               :class="[
-                'relative inline-flex h-6 w-11 flex-shrink-0 items-center rounded-full transition-colors',
+                'relative inline-flex h-6 w-11 flex-shrink-0 cursor-pointer items-center rounded-full transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary-500 focus-visible:ring-offset-2 dark:focus-visible:ring-offset-dark-900',
                 createModelsListState.enabled
                   ? 'bg-primary-500'
                   : 'bg-gray-300 dark:bg-dark-600',
@@ -768,12 +771,45 @@
             </button>
           </div>
           <div
-            v-if="createModelsListState.enabled"
+            v-if="createForm.platform === 'openai'"
+            class="mb-3 flex items-center justify-between gap-3 rounded-lg border border-gray-200 bg-gray-50 px-3 py-2.5 dark:border-dark-600 dark:bg-dark-800/50"
+          >
+            <div class="min-w-0">
+              <p class="text-sm font-medium text-gray-700 dark:text-gray-300">
+                {{ t("admin.groups.modelsList.enforceTitle") }}
+              </p>
+              <p class="mt-1 text-xs text-gray-500 dark:text-gray-400">
+                {{ t("admin.groups.modelsList.enforceHint") }}
+              </p>
+            </div>
+            <button
+              type="button"
+              role="switch"
+              :aria-checked="createModelsListState.enforce"
+              :aria-label="t('admin.groups.modelsList.enforceTitle')"
+              @click="toggleCreateModelsListEnforce"
+              :class="[
+                'relative inline-flex h-6 w-11 flex-shrink-0 cursor-pointer items-center rounded-full transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary-500 focus-visible:ring-offset-2 dark:focus-visible:ring-offset-dark-900',
+                createModelsListState.enforce
+                  ? 'bg-primary-500'
+                  : 'bg-gray-300 dark:bg-dark-600',
+              ]"
+            >
+              <span
+                :class="[
+                  'inline-block h-4 w-4 transform rounded-full bg-white shadow transition-transform',
+                  createModelsListState.enforce ? 'translate-x-6' : 'translate-x-1',
+                ]"
+              />
+            </button>
+          </div>
+          <div
+            v-if="createModelsListState.enabled || (createForm.platform === 'openai' && createModelsListState.enforce)"
             class="overflow-hidden rounded-lg border border-gray-200 bg-gray-50/50 dark:border-dark-600 dark:bg-dark-800/40"
           >
             <div
               v-if="!createModelsListLoading && createModelsListState.items.length > 0"
-              class="flex items-center justify-between gap-2 border-b border-gray-200 bg-gray-50 px-3 py-2 text-xs dark:border-dark-600 dark:bg-dark-800"
+              class="flex flex-wrap items-center justify-between gap-2 border-b border-gray-200 bg-gray-50 px-3 py-2 text-xs dark:border-dark-600 dark:bg-dark-800"
             >
               <span class="text-gray-500 dark:text-gray-400">
                 {{
@@ -783,17 +819,17 @@
                   })
                 }}
               </span>
-              <div class="flex items-center gap-1.5">
+              <div class="flex flex-wrap items-center gap-1.5">
                 <button
                   type="button"
-                  class="rounded px-2 py-1 font-medium text-primary-600 transition-colors hover:bg-primary-50 dark:text-primary-400 dark:hover:bg-primary-900/20"
+                  class="cursor-pointer rounded px-2 py-1 font-medium text-primary-600 transition-colors hover:bg-primary-50 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary-500 dark:text-primary-400 dark:hover:bg-primary-900/20"
                   @click="selectAllModelsListItems(createModelsListState)"
                 >
                   {{ t("admin.groups.modelsList.selectAll") }}
                 </button>
                 <button
                   type="button"
-                  class="rounded px-2 py-1 font-medium text-gray-600 transition-colors hover:bg-gray-100 dark:text-gray-300 dark:hover:bg-dark-700"
+                  class="cursor-pointer rounded px-2 py-1 font-medium text-gray-600 transition-colors hover:bg-gray-100 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary-500 dark:text-gray-300 dark:hover:bg-dark-700"
                   @click="invertModelsListSelection(createModelsListState)"
                 >
                   {{ t("admin.groups.modelsList.invertSelection") }}
@@ -820,7 +856,8 @@
                 <input
                   v-model="item.selected"
                   type="checkbox"
-                  class="h-4 w-4 rounded border-gray-300 text-primary-600 focus:ring-primary-500"
+                  :aria-label="item.id"
+                  class="h-4 w-4 cursor-pointer rounded border-gray-300 text-primary-600 focus:ring-primary-500"
                 />
                 <span class="min-w-0 flex-1 break-all text-sm text-gray-700 dark:text-gray-300">
                   {{ item.id }}
@@ -828,7 +865,8 @@
                 <button
                   type="button"
                   :disabled="index === 0"
-                  class="rounded p-1 text-gray-400 hover:bg-gray-100 hover:text-gray-700 disabled:opacity-40 dark:hover:bg-dark-600 dark:hover:text-gray-200"
+                  :aria-label="t('admin.groups.modelsList.moveUp', { model: item.id })"
+                  class="cursor-pointer rounded p-1 text-gray-400 hover:bg-gray-100 hover:text-gray-700 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary-500 disabled:cursor-not-allowed disabled:opacity-40 dark:hover:bg-dark-600 dark:hover:text-gray-200"
                   @click="moveCreateModelsListItem(index, index - 1)"
                 >
                   <Icon name="arrowUp" size="sm" />
@@ -836,7 +874,8 @@
                 <button
                   type="button"
                   :disabled="index === createModelsListState.items.length - 1"
-                  class="rounded p-1 text-gray-400 hover:bg-gray-100 hover:text-gray-700 disabled:opacity-40 dark:hover:bg-dark-600 dark:hover:text-gray-200"
+                  :aria-label="t('admin.groups.modelsList.moveDown', { model: item.id })"
+                  class="cursor-pointer rounded p-1 text-gray-400 hover:bg-gray-100 hover:text-gray-700 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary-500 disabled:cursor-not-allowed disabled:opacity-40 dark:hover:bg-dark-600 dark:hover:text-gray-200"
                   @click="moveCreateModelsListItem(index, index + 1)"
                 >
                   <Icon name="arrowDown" size="sm" />
@@ -844,6 +883,13 @@
               </div>
             </div>
           </div>
+          <p
+            v-if="createForm.platform === 'openai' && createModelsListState.enforce && createModelsListEffectiveStrictCount === 0"
+            role="alert"
+            class="mt-2 rounded-lg border border-amber-200 bg-amber-50 px-3 py-2 text-xs leading-relaxed text-amber-700 dark:border-amber-800/70 dark:bg-amber-900/20 dark:text-amber-300"
+          >
+            {{ t("admin.groups.modelsList.enforceEmptyWarning") }}
+          </p>
         </div>
 
         <!-- 图片生成计费配置 -->
@@ -2259,7 +2305,7 @@
 
         <div class="border-t pt-4">
           <div class="mb-3 flex items-center justify-between gap-3">
-            <div>
+            <div class="min-w-0">
               <label class="text-sm font-medium text-gray-700 dark:text-gray-300">
                 {{ t("admin.groups.modelsList.title") }}
               </label>
@@ -2269,9 +2315,12 @@
             </div>
             <button
               type="button"
+              role="switch"
+              :aria-checked="editModelsListState.enabled"
+              :aria-label="t('admin.groups.modelsList.title')"
               @click="editModelsListState.enabled = !editModelsListState.enabled"
               :class="[
-                'relative inline-flex h-6 w-11 flex-shrink-0 items-center rounded-full transition-colors',
+                'relative inline-flex h-6 w-11 flex-shrink-0 cursor-pointer items-center rounded-full transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary-500 focus-visible:ring-offset-2 dark:focus-visible:ring-offset-dark-900',
                 editModelsListState.enabled
                   ? 'bg-primary-500'
                   : 'bg-gray-300 dark:bg-dark-600',
@@ -2286,12 +2335,45 @@
             </button>
           </div>
           <div
-            v-if="editModelsListState.enabled"
+            v-if="editForm.platform === 'openai'"
+            class="mb-3 flex items-center justify-between gap-3 rounded-lg border border-gray-200 bg-gray-50 px-3 py-2.5 dark:border-dark-600 dark:bg-dark-800/50"
+          >
+            <div class="min-w-0">
+              <p class="text-sm font-medium text-gray-700 dark:text-gray-300">
+                {{ t("admin.groups.modelsList.enforceTitle") }}
+              </p>
+              <p class="mt-1 text-xs text-gray-500 dark:text-gray-400">
+                {{ t("admin.groups.modelsList.enforceHint") }}
+              </p>
+            </div>
+            <button
+              type="button"
+              role="switch"
+              :aria-checked="editModelsListState.enforce"
+              :aria-label="t('admin.groups.modelsList.enforceTitle')"
+              @click="toggleEditModelsListEnforce"
+              :class="[
+                'relative inline-flex h-6 w-11 flex-shrink-0 cursor-pointer items-center rounded-full transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary-500 focus-visible:ring-offset-2 dark:focus-visible:ring-offset-dark-900',
+                editModelsListState.enforce
+                  ? 'bg-primary-500'
+                  : 'bg-gray-300 dark:bg-dark-600',
+              ]"
+            >
+              <span
+                :class="[
+                  'inline-block h-4 w-4 transform rounded-full bg-white shadow transition-transform',
+                  editModelsListState.enforce ? 'translate-x-6' : 'translate-x-1',
+                ]"
+              />
+            </button>
+          </div>
+          <div
+            v-if="editModelsListState.enabled || (editForm.platform === 'openai' && editModelsListState.enforce)"
             class="overflow-hidden rounded-lg border border-gray-200 bg-gray-50/50 dark:border-dark-600 dark:bg-dark-800/40"
           >
             <div
               v-if="!editModelsListLoading && editModelsListState.items.length > 0"
-              class="flex items-center justify-between gap-2 border-b border-gray-200 bg-gray-50 px-3 py-2 text-xs dark:border-dark-600 dark:bg-dark-800"
+              class="flex flex-wrap items-center justify-between gap-2 border-b border-gray-200 bg-gray-50 px-3 py-2 text-xs dark:border-dark-600 dark:bg-dark-800"
             >
               <span class="text-gray-500 dark:text-gray-400">
                 {{
@@ -2301,17 +2383,17 @@
                   })
                 }}
               </span>
-              <div class="flex items-center gap-1.5">
+              <div class="flex flex-wrap items-center gap-1.5">
                 <button
                   type="button"
-                  class="rounded px-2 py-1 font-medium text-primary-600 transition-colors hover:bg-primary-50 dark:text-primary-400 dark:hover:bg-primary-900/20"
+                  class="cursor-pointer rounded px-2 py-1 font-medium text-primary-600 transition-colors hover:bg-primary-50 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary-500 dark:text-primary-400 dark:hover:bg-primary-900/20"
                   @click="selectAllModelsListItems(editModelsListState)"
                 >
                   {{ t("admin.groups.modelsList.selectAll") }}
                 </button>
                 <button
                   type="button"
-                  class="rounded px-2 py-1 font-medium text-gray-600 transition-colors hover:bg-gray-100 dark:text-gray-300 dark:hover:bg-dark-700"
+                  class="cursor-pointer rounded px-2 py-1 font-medium text-gray-600 transition-colors hover:bg-gray-100 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary-500 dark:text-gray-300 dark:hover:bg-dark-700"
                   @click="invertModelsListSelection(editModelsListState)"
                 >
                   {{ t("admin.groups.modelsList.invertSelection") }}
@@ -2338,7 +2420,8 @@
                 <input
                   v-model="item.selected"
                   type="checkbox"
-                  class="h-4 w-4 rounded border-gray-300 text-primary-600 focus:ring-primary-500"
+                  :aria-label="item.id"
+                  class="h-4 w-4 cursor-pointer rounded border-gray-300 text-primary-600 focus:ring-primary-500"
                 />
                 <span class="min-w-0 flex-1 break-all text-sm text-gray-700 dark:text-gray-300">
                   {{ item.id }}
@@ -2346,7 +2429,8 @@
                 <button
                   type="button"
                   :disabled="index === 0"
-                  class="rounded p-1 text-gray-400 hover:bg-gray-100 hover:text-gray-700 disabled:opacity-40 dark:hover:bg-dark-600 dark:hover:text-gray-200"
+                  :aria-label="t('admin.groups.modelsList.moveUp', { model: item.id })"
+                  class="cursor-pointer rounded p-1 text-gray-400 hover:bg-gray-100 hover:text-gray-700 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary-500 disabled:cursor-not-allowed disabled:opacity-40 dark:hover:bg-dark-600 dark:hover:text-gray-200"
                   @click="moveEditModelsListItem(index, index - 1)"
                 >
                   <Icon name="arrowUp" size="sm" />
@@ -2354,7 +2438,8 @@
                 <button
                   type="button"
                   :disabled="index === editModelsListState.items.length - 1"
-                  class="rounded p-1 text-gray-400 hover:bg-gray-100 hover:text-gray-700 disabled:opacity-40 dark:hover:bg-dark-600 dark:hover:text-gray-200"
+                  :aria-label="t('admin.groups.modelsList.moveDown', { model: item.id })"
+                  class="cursor-pointer rounded p-1 text-gray-400 hover:bg-gray-100 hover:text-gray-700 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary-500 disabled:cursor-not-allowed disabled:opacity-40 dark:hover:bg-dark-600 dark:hover:text-gray-200"
                   @click="moveEditModelsListItem(index, index + 1)"
                 >
                   <Icon name="arrowDown" size="sm" />
@@ -2362,6 +2447,13 @@
               </div>
             </div>
           </div>
+          <p
+            v-if="editForm.platform === 'openai' && editModelsListState.enforce && editModelsListEffectiveStrictCount === 0"
+            role="alert"
+            class="mt-2 rounded-lg border border-amber-200 bg-amber-50 px-3 py-2 text-xs leading-relaxed text-amber-700 dark:border-amber-800/70 dark:bg-amber-900/20 dark:text-amber-300"
+          >
+            {{ t("admin.groups.modelsList.enforceEmptyWarning") }}
+          </p>
         </div>
 
         <!-- 图片生成计费配置 -->
@@ -3621,11 +3713,13 @@ import {
 } from "./groupsMessagesDispatch";
 import {
   buildModelsListConfig,
+  countEffectiveStrictModels,
   createModelsListState as createInitialModelsListState,
   invertModelsListSelection,
   moveModelsListItem,
   selectAllModelsListItems,
   setModelsListCandidates,
+  setModelsListEnforce,
 } from "./groupsModelsList";
 import { createModelsListCandidatesTracker } from "./groupsModelsListCandidates";
 import { normalizeSupportedModelScopesForPlatform } from "./groupsSupportedModelScopes";
@@ -4019,10 +4113,20 @@ const createReasoningEffortPolicyRef = ref<ReasoningEffortPolicyFieldsExpose | n
 const editReasoningEffortPolicyRef = ref<ReasoningEffortPolicyFieldsExpose | null>(null);
 const modelsListCandidatesTracker = createModelsListCandidatesTracker();
 const createModelsListSelectedCount = computed(
-  () => createModelsListState.items.filter((item) => item.selected).length,
+  () => createModelsListState.items.length > 0
+    ? createModelsListState.items.filter((item) => item.selected).length
+    : createModelsListState.savedModels.length,
 );
 const editModelsListSelectedCount = computed(
-  () => editModelsListState.items.filter((item) => item.selected).length,
+  () => editModelsListState.items.length > 0
+    ? editModelsListState.items.filter((item) => item.selected).length
+    : editModelsListState.savedModels.length,
+);
+const createModelsListEffectiveStrictCount = computed(
+  () => countEffectiveStrictModels(createModelsListState),
+);
+const editModelsListEffectiveStrictCount = computed(
+  () => countEffectiveStrictModels(editModelsListState),
 );
 
 const createForm = reactive({
@@ -4287,6 +4391,8 @@ const resetModelsListState = (
 ) => {
   const fresh = createInitialModelsListState(config);
   state.enabled = fresh.enabled;
+  state.enforce = fresh.enforce;
+  state.explicitEmptyStrictList = fresh.explicitEmptyStrictList;
   state.savedModels = fresh.savedModels;
   state.items = fresh.items;
 };
@@ -4325,6 +4431,17 @@ const moveCreateModelsListItem = (fromIndex: number, toIndex: number) => {
 
 const moveEditModelsListItem = (fromIndex: number, toIndex: number) => {
   moveModelsListItem(editModelsListState, fromIndex, toIndex);
+};
+
+const toggleCreateModelsListEnforce = () => {
+  setModelsListEnforce(
+    createModelsListState,
+    !createModelsListState.enforce,
+  );
+};
+
+const toggleEditModelsListEnforce = () => {
+  setModelsListEnforce(editModelsListState, !editModelsListState.enforce);
 };
 
 // 将 UI 格式的路由规则转换为 API 格式

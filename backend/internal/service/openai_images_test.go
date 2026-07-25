@@ -14,6 +14,7 @@ import (
 	"testing"
 
 	"github.com/Wei-Shaw/sub2api/internal/config"
+	infraerrors "github.com/Wei-Shaw/sub2api/internal/pkg/errors"
 	"github.com/gin-gonic/gin"
 	"github.com/imroc/req/v3"
 	"github.com/stretchr/testify/require"
@@ -56,6 +57,50 @@ func TestOpenAIGatewayServiceParseOpenAIImagesRequest_JSON(t *testing.T) {
 	require.Equal(t, "1K", parsed.SizeTier)
 	require.Equal(t, OpenAIImagesCapabilityNative, parsed.RequiredCapability)
 	require.False(t, parsed.Multipart)
+}
+
+func TestOpenAIGatewayServiceParseOpenAIImagesRequestForGroup_ValidatesWhitelistBeforeImageCapability(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	group := &Group{
+		Platform: PlatformOpenAI,
+		ModelsListConfig: GroupModelsListConfig{
+			Enforce: true,
+			Models:  []string{"gpt-image-1"},
+		},
+	}
+
+	for _, body := range []string{
+		`{"model":"gpt-5.6-terra","prompt":"draw"}`,
+		`{"prompt":"draw"}`,
+	} {
+		c, _ := gin.CreateTestContext(httptest.NewRecorder())
+		c.Request = httptest.NewRequest(http.MethodPost, "/v1/images/generations", strings.NewReader(body))
+		c.Request.Header.Set("Content-Type", "application/json")
+
+		_, err := (&OpenAIGatewayService{}).ParseOpenAIImagesRequestForGroup(c, []byte(body), group)
+		require.Error(t, err)
+		require.Equal(t, ModelNotAllowedErrorCode, infraerrors.Reason(err))
+	}
+}
+
+func TestOpenAIGatewayServiceParseOpenAIImagesRequestForGroup_RejectsNonStringModelEvenWhenRenderedTextIsAllowed(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	group := &Group{
+		Platform: PlatformOpenAI,
+		ModelsListConfig: GroupModelsListConfig{
+			Enforce: true,
+			Models:  []string{"123"},
+		},
+	}
+	body := []byte(`{"model":123,"prompt":"draw"}`)
+	c, _ := gin.CreateTestContext(httptest.NewRecorder())
+	c.Request = httptest.NewRequest(http.MethodPost, "/v1/images/generations", bytes.NewReader(body))
+	c.Request.Header.Set("Content-Type", "application/json")
+
+	_, err := (&OpenAIGatewayService{}).ParseOpenAIImagesRequestForGroup(c, body, group)
+
+	require.Error(t, err)
+	require.Equal(t, ModelNotAllowedErrorCode, infraerrors.Reason(err))
 }
 
 func TestOpenAIGatewayServiceParseOpenAIImagesRequest_MultipartEdit(t *testing.T) {

@@ -176,6 +176,19 @@ func (r *OpenAIImagesRequest) StickySessionSeed() string {
 }
 
 func (s *OpenAIGatewayService) ParseOpenAIImagesRequest(c *gin.Context, body []byte) (*OpenAIImagesRequest, error) {
+	return s.parseOpenAIImagesRequest(c, body, nil)
+}
+
+// ParseOpenAIImagesRequestForGroup parses an Images request while applying an
+// OpenAI group's strict model allowlist before image-specific model validation.
+// This ordering is important: a request for a disallowed (but otherwise
+// syntactically valid) model must consistently return model_not_allowed rather
+// than being classified first as an unsupported image model.
+func (s *OpenAIGatewayService) ParseOpenAIImagesRequestForGroup(c *gin.Context, body []byte, group *Group) (*OpenAIImagesRequest, error) {
+	return s.parseOpenAIImagesRequest(c, body, group)
+}
+
+func (s *OpenAIGatewayService) parseOpenAIImagesRequest(c *gin.Context, body []byte, group *Group) (*OpenAIImagesRequest, error) {
 	if c == nil || c.Request == nil {
 		return nil, fmt.Errorf("missing request context")
 	}
@@ -196,6 +209,7 @@ func (s *OpenAIGatewayService) ParseOpenAIImagesRequest(c *gin.Context, body []b
 		req.bodyHash = hex.EncodeToString(sum[:8])
 	}
 
+	strictModelValidated := false
 	mediaType, _, err := mime.ParseMediaType(contentType)
 	if err == nil && strings.EqualFold(mediaType, "multipart/form-data") {
 		req.Multipart = true
@@ -209,8 +223,37 @@ func (s *OpenAIGatewayService) ParseOpenAIImagesRequest(c *gin.Context, body []b
 		if !gjson.ValidBytes(body) {
 			return nil, fmt.Errorf("failed to parse request body")
 		}
+		if group != nil && group.ModelWhitelistEnabled() {
+			// gjson.String() also renders JSON numbers and booleans as text. A
+			// strict allowlist must only compare an actual client-supplied JSON
+			// string, otherwise a numeric model such as 123 could match an entry
+			// named "123" and bypass the fail-closed rule.
+			requestedModel := ""
+			modelResult := gjson.GetBytes(body, "model")
+			if modelResult.Exists() && modelResult.Type == gjson.String {
+				requestedModel = strings.TrimSpace(modelResult.String())
+			}
+			if err := ValidateOpenAIGroupModelPayload(group, body, "model", requestedModel); err != nil {
+				return nil, err
+			}
+			strictModelValidated = true
+		}
 		if parseErr := parseOpenAIImagesJSONRequest(body, req); parseErr != nil {
 			return nil, parseErr
+		}
+	}
+
+	// Validate the raw client model before defaults and image capability checks.
+	// In strict mode an omitted model is deliberately passed as an empty value so
+	// the allowlist fails closed; legacy/non-strict callers keep the old default
+	// model behavior.
+	if group != nil && group.ModelWhitelistEnabled() && !strictModelValidated {
+		requestedModel := req.Model
+		if !req.ExplicitModel {
+			requestedModel = ""
+		}
+		if err := ValidateOpenAIGroupModel(group, requestedModel); err != nil {
+			return nil, err
 		}
 	}
 

@@ -1007,12 +1007,17 @@ export default {
       },
       modelsList: {
         title: 'Custom /v1/models Model List',
-        hint: 'Only changes the /v1/models response. Whitelist model calls and account routing are unchanged.',
+        hint: 'This switch only controls model discovery results. The strict allowlist below independently controls real requests.',
+        enforceTitle: 'Only allow selected models',
+        enforceHint: 'When enabled, API keys in this OpenAI group may only call the selected models. Validation runs before model mapping and account routing.',
+        enforceEmptyWarning: 'No concrete model IDs are selected for the strict allowlist (wildcards do not apply). Saving will reject every model request for this group.',
         loading: 'Loading model list...',
         empty: 'No displayable models',
         selectedSummary: 'Selected {selected} / {total}',
         selectAll: 'Select all',
-        invertSelection: 'Invert'
+        invertSelection: 'Invert',
+        moveUp: 'Move model {model} up',
+        moveDown: 'Move model {model} down'
       },
       claudeCode: {
         title: 'Claude Code Client Restriction',

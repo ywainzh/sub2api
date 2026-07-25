@@ -1004,12 +1004,17 @@ export default {
       },
       modelsList: {
         title: '自定义 /v1/models 模型列表',
-        hint: '仅影响 /v1/models 展示结果，不影响白名单模型调用和账号调度。',
+        hint: '此开关只控制模型发现接口的展示结果；下方严格白名单开关独立控制实际请求。',
+        enforceTitle: '强制仅允许所选模型',
+        enforceHint: '开启后，此 OpenAI 分组的 API Key 只能调用下方选中的模型，校验发生在模型映射和账号调度之前。',
+        enforceEmptyWarning: '当前没有选中可用于严格白名单的具体模型（通配符不生效）。保存后，该分组的所有模型请求都会被拒绝。',
         loading: '正在加载模型列表...',
         empty: '暂无可展示模型',
         selectedSummary: '已选 {selected} / {total}',
         selectAll: '全选',
-        invertSelection: '反选'
+        invertSelection: '反选',
+        moveUp: '上移模型 {model}',
+        moveDown: '下移模型 {model}'
       },
       claudeCode: {
         title: 'Claude Code 客户端限制',

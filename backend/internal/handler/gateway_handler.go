@@ -1018,6 +1018,23 @@ func (h *GatewayHandler) Models(c *gin.Context) {
 
 	// Get available models from account configurations for the selected group platform.
 	availableModels := h.gatewayService.GetAvailableModels(c.Request.Context(), groupID, platform)
+	if apiKey != nil && apiKey.Group != nil && apiKey.Group.ModelWhitelistEnabled() {
+		fallbackModels := defaultModelIDsForPlatform(platform)
+		source := customModelsListSource(platform, availableModels, fallbackModels)
+		if len(source) == 0 {
+			source = fallbackModels
+		}
+		// Keep the legacy display-list semantics when enabled (including the
+		// administrator's selected ordering), then intersect that result with
+		// the independent strict request allowlist. When display filtering is
+		// disabled, strict mode filters the original discovery order directly.
+		if apiKey.Group.ModelsListConfig.Enabled && len(apiKey.Group.ModelsListConfig.Models) > 0 {
+			source = filterModelsByStrictCustomList(source, fallbackModels, apiKey.Group.ModelsListConfig.Models)
+		}
+		availableModels = service.FilterModelsByStrictWhitelist(source, apiKey.Group.ModelsListConfig.Models)
+		writeCustomModelsList(c, platform, availableModels)
+		return
+	}
 	if apiKey != nil && apiKey.Group != nil && apiKey.Group.CustomModelsListEnabled() {
 		fallbackModels := defaultModelIDsForPlatform(platform)
 		availableModels = filterModelsByCustomList(customModelsListSource(platform, availableModels, fallbackModels), fallbackModels, apiKey.Group.ModelsListConfig.Models)
@@ -1219,6 +1236,61 @@ func filterModelsByCustomList(availableModels, fallbackModels, selectedModels []
 
 func customModelsListAllowsModel(availablePatterns []string, model string) bool {
 	for _, pattern := range availablePatterns {
+		if pattern == model {
+			return true
+		}
+		if strings.HasSuffix(pattern, "*") && strings.HasPrefix(model, strings.TrimSuffix(pattern, "*")) {
+			return true
+		}
+	}
+	return false
+}
+
+// filterModelsByStrictCustomList keeps the legacy display-list ordering while
+// applying the strict allowlist's case-insensitive comparison rules. It is
+// intentionally separate from filterModelsByCustomList so groups with enforce
+// disabled retain their historical case-sensitive display behavior.
+func filterModelsByStrictCustomList(availableModels, fallbackModels, selectedModels []string) []string {
+	if len(selectedModels) == 0 {
+		return availableModels
+	}
+	source := availableModels
+	if len(source) == 0 {
+		source = fallbackModels
+	}
+	if len(source) == 0 {
+		return nil
+	}
+
+	allowed := make([]string, 0, len(source))
+	for _, model := range source {
+		model = strings.TrimSpace(model)
+		if model != "" {
+			allowed = append(allowed, model)
+		}
+	}
+
+	seen := make(map[string]struct{}, len(selectedModels))
+	filtered := make([]string, 0, len(selectedModels))
+	for _, model := range selectedModels {
+		model = strings.TrimSpace(model)
+		if model == "" || !strictCustomModelsListAllowsModel(allowed, model) {
+			continue
+		}
+		key := strings.ToLower(model)
+		if _, ok := seen[key]; ok {
+			continue
+		}
+		seen[key] = struct{}{}
+		filtered = append(filtered, model)
+	}
+	return filtered
+}
+
+func strictCustomModelsListAllowsModel(availablePatterns []string, model string) bool {
+	model = strings.ToLower(strings.TrimSpace(model))
+	for _, pattern := range availablePatterns {
+		pattern = strings.ToLower(strings.TrimSpace(pattern))
 		if pattern == model {
 			return true
 		}

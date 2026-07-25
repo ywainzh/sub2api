@@ -64,6 +64,9 @@ func (s *adminServiceImpl) GetGroupModelsListCandidates(ctx context.Context, id 
 	}
 
 	candidates := defaultModelsListCandidateIDs(platform)
+	if platform == PlatformOpenAI {
+		candidates = prioritizeModelCandidate(candidates, "gpt-5.6-terra")
+	}
 	if id <= 0 || s.accountRepo == nil {
 		return candidates, nil
 	}
@@ -94,6 +97,33 @@ func (s *adminServiceImpl) GetGroupModelsListCandidates(ctx context.Context, id 
 		}
 	}
 	return candidates, nil
+}
+
+func prioritizeModelCandidate(models []string, preferred string) []string {
+	preferred = strings.TrimSpace(preferred)
+	if preferred == "" {
+		return models
+	}
+	index := -1
+	for i, model := range models {
+		if strings.EqualFold(strings.TrimSpace(model), preferred) {
+			index = i
+			break
+		}
+	}
+	if index == 0 {
+		return models
+	}
+	out := make([]string, 0, len(models)+1)
+	if index < 0 {
+		out = append(out, preferred)
+		out = append(out, models...)
+		return out
+	}
+	out = append(out, models[index])
+	out = append(out, models[:index]...)
+	out = append(out, models[index+1:]...)
+	return out
 }
 
 func defaultModelsListCandidateIDs(platform string) []string {

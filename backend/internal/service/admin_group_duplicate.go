@@ -126,6 +126,7 @@ func cloneGroupForDuplicate(source *Group, operationID string) *Group {
 		MessagesDispatchModelConfig:     cloneGroupMessagesDispatchModelConfig(source.MessagesDispatchModelConfig),
 		ModelsListConfig: GroupModelsListConfig{
 			Enabled: source.ModelsListConfig.Enabled,
+			Enforce: source.ModelsListConfig.Enforce,
 			Models:  append([]string(nil), source.ModelsListConfig.Models...),
 		},
 		RPMLimit:                source.RPMLimit,

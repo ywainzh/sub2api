@@ -590,6 +590,81 @@ func validateCodexModelsManifestEnvelope(body []byte) error {
 	return nil
 }
 
+// FilterCodexModelsManifestForGroup applies an OpenAI group's strict model
+// allowlist while retaining every unknown top-level and per-model field from
+// the upstream manifest. A local ETag is derived from the upstream identity,
+// group and filtered payload so different groups can never share stale 304s.
+func FilterCodexModelsManifestForGroup(manifest *CodexModelsManifest, group *Group, ifNoneMatch string) (*CodexModelsManifest, error) {
+	if manifest == nil || group == nil || !group.ModelWhitelistEnabled() {
+		return manifest, nil
+	}
+	if manifest.NotModified || len(bytes.TrimSpace(manifest.Body)) == 0 {
+		return nil, infraerrors.New(http.StatusBadGateway, "OPENAI_CODEX_MODELS_FILTER_FAILED", "Codex models manifest body is unavailable for whitelist filtering")
+	}
+
+	var envelope map[string]json.RawMessage
+	if err := json.Unmarshal(manifest.Body, &envelope); err != nil || envelope == nil {
+		return nil, infraerrors.Newf(http.StatusBadGateway, "OPENAI_CODEX_MODELS_FILTER_FAILED", "decode Codex models manifest: %v", err)
+	}
+	var entries []json.RawMessage
+	if err := json.Unmarshal(envelope["models"], &entries); err != nil {
+		return nil, infraerrors.Newf(http.StatusBadGateway, "OPENAI_CODEX_MODELS_FILTER_FAILED", "decode Codex models list: %v", err)
+	}
+
+	filtered := make([]json.RawMessage, 0, len(entries))
+	for _, entry := range entries {
+		var model struct {
+			Slug string `json:"slug"`
+		}
+		if err := json.Unmarshal(entry, &model); err != nil {
+			continue
+		}
+		if group.IsModelAllowed(model.Slug) {
+			filtered = append(filtered, entry)
+		}
+	}
+	modelsJSON, err := json.Marshal(filtered)
+	if err != nil {
+		return nil, infraerrors.Newf(http.StatusInternalServerError, "OPENAI_CODEX_MODELS_FILTER_FAILED", "encode filtered Codex models: %v", err)
+	}
+	envelope["models"] = modelsJSON
+	body, err := json.Marshal(envelope)
+	if err != nil {
+		return nil, infraerrors.Newf(http.StatusInternalServerError, "OPENAI_CODEX_MODELS_FILTER_FAILED", "encode filtered Codex manifest: %v", err)
+	}
+
+	hasher := sha256.New()
+	_, _ = fmt.Fprintf(hasher, "%d\n%s\n", group.ID, strings.TrimSpace(manifest.ETag))
+	for _, model := range normalizedCodexModelsWhitelist(group.ModelsListConfig.Models) {
+		_, _ = fmt.Fprintf(hasher, "%s\n", model)
+	}
+	_, _ = hasher.Write(body)
+	digest := hasher.Sum(nil)
+	etag := fmt.Sprintf(`"sub2api-models-%x"`, digest[:16])
+	if codexModelsManifestETagMatches(ifNoneMatch, etag) {
+		return &CodexModelsManifest{ETag: etag, NotModified: true}, nil
+	}
+	return &CodexModelsManifest{Body: body, ETag: etag}, nil
+}
+
+func normalizedCodexModelsWhitelist(models []string) []string {
+	seen := make(map[string]struct{}, len(models))
+	normalized := make([]string, 0, len(models))
+	for _, model := range models {
+		model = strings.ToLower(strings.TrimSpace(model))
+		if model == "" {
+			continue
+		}
+		if _, exists := seen[model]; exists {
+			continue
+		}
+		seen[model] = struct{}{}
+		normalized = append(normalized, model)
+	}
+	sort.Strings(normalized)
+	return normalized
+}
+
 func buildCodexModelsManifestCacheKey(request codexModelsManifestRequest) string {
 	hasher := sha256.New()
 	_, _ = fmt.Fprintf(hasher, "%d\n%d\n%s\n%s\n", request.accountID, request.credentialAccountID, request.proxyURL, request.url)

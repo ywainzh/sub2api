@@ -71,10 +71,16 @@ func (h *OpenAIGatewayHandler) AlphaSearch(c *gin.Context) {
 
 	modelResult := gjson.GetBytes(body, "model")
 	if !modelResult.Exists() || modelResult.Type != gjson.String || strings.TrimSpace(modelResult.String()) == "" {
+		if h.rejectOpenAIGroupModelPayload(c, apiKey, body, "model", "") {
+			return
+		}
 		h.errorResponse(c, http.StatusBadRequest, "invalid_request_error", "model is required")
 		return
 	}
 	requestedModel := strings.TrimSpace(modelResult.String())
+	if h.rejectOpenAIGroupModelPayload(c, apiKey, body, "model", requestedModel) {
+		return
+	}
 	reqLog = reqLog.With(zap.String("model", requestedModel))
 	setOpsRequestContext(c, requestedModel, false)
 	setOpsEndpointContext(c, "", int16(service.RequestTypeSync))

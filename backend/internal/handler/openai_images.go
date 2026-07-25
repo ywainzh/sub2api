@@ -8,6 +8,7 @@ import (
 	"strings"
 	"time"
 
+	infraerrors "github.com/Wei-Shaw/sub2api/internal/pkg/errors"
 	pkghttputil "github.com/Wei-Shaw/sub2api/internal/pkg/httputil"
 	"github.com/Wei-Shaw/sub2api/internal/pkg/ip"
 	"github.com/Wei-Shaw/sub2api/internal/pkg/logger"
@@ -68,8 +69,12 @@ func (h *OpenAIGatewayHandler) Images(c *gin.Context) {
 		setOpsRequestContext(c, "", false)
 	}
 
-	parsed, err := h.gatewayService.ParseOpenAIImagesRequest(c, body)
+	parsed, err := h.gatewayService.ParseOpenAIImagesRequestForGroup(c, body, apiKey.Group)
 	if err != nil {
+		if infraerrors.Reason(err) == service.ModelNotAllowedErrorCode {
+			h.errorResponseWithCode(c, infraerrors.Code(err), "invalid_request_error", infraerrors.Reason(err), infraerrors.Message(err))
+			return
+		}
 		h.errorResponse(c, http.StatusBadRequest, "invalid_request_error", err.Error())
 		return
 	}

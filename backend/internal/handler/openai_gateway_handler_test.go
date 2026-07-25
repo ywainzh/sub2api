@@ -914,7 +914,7 @@ func TestOpenAIResponsesWebSocket_InvalidUpgradeDoesNotSetTransport(t *testing.T
 	h := &OpenAIGatewayHandler{}
 	h.ResponsesWebSocket(c)
 
-	require.Equal(t, http.StatusUpgradeRequired, w.Code)
+	require.Equal(t, http.StatusBadRequest, w.Code)
 	require.Equal(t, service.OpenAIClientTransportUnknown, service.GetOpenAIClientTransport(c))
 }
 

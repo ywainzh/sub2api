@@ -26,6 +26,54 @@ type codexModelsHTTPUpstreamStub struct {
 	do func(req *http.Request, proxyURL string, accountID int64, accountConcurrency int) (*http.Response, error)
 }
 
+func TestFilterCodexModelsManifestForGroup_PreservesFieldsFiltersAndScopesETag(t *testing.T) {
+	manifest := &CodexModelsManifest{
+		Body: []byte(`{"models":[{"slug":"gpt-5.6-terra","display_name":"Terra","extra":{"x":1}},{"slug":"gpt-5.4","display_name":"Legacy"}],"notice":"keep"}`),
+		ETag: `"upstream-v1"`,
+	}
+	group := &Group{
+		ID:       51,
+		Platform: PlatformOpenAI,
+		ModelsListConfig: GroupModelsListConfig{
+			Enforce: true,
+			Models:  []string{"GPT-5.6-TERRA"},
+		},
+	}
+
+	filtered, err := FilterCodexModelsManifestForGroup(manifest, group, "")
+	require.NoError(t, err)
+	require.NotEmpty(t, filtered.ETag)
+	require.JSONEq(t, `{"models":[{"slug":"gpt-5.6-terra","display_name":"Terra","extra":{"x":1}}],"notice":"keep"}`, string(filtered.Body))
+
+	notModified, err := FilterCodexModelsManifestForGroup(manifest, group, filtered.ETag)
+	require.NoError(t, err)
+	require.True(t, notModified.NotModified)
+	require.Equal(t, filtered.ETag, notModified.ETag)
+
+	otherGroup := *group
+	otherGroup.ID = 52
+	otherFiltered, err := FilterCodexModelsManifestForGroup(manifest, &otherGroup, filtered.ETag)
+	require.NoError(t, err)
+	require.False(t, otherFiltered.NotModified)
+	require.NotEqual(t, filtered.ETag, otherFiltered.ETag)
+
+	canonicalGroup := *group
+	canonicalGroup.ModelsListConfig.Models = []string{" gpt-5.6-terra ", "GPT-5.6-TERRA"}
+	canonicalFiltered, err := FilterCodexModelsManifestForGroup(manifest, &canonicalGroup, filtered.ETag)
+	require.NoError(t, err)
+	require.True(t, canonicalFiltered.NotModified, "equivalent normalized allowlists must share the same local ETag")
+}
+
+func TestFilterCodexModelsManifestForGroup_EmptyWhitelistReturnsEmptyModels(t *testing.T) {
+	filtered, err := FilterCodexModelsManifestForGroup(
+		&CodexModelsManifest{Body: []byte(`{"models":[{"slug":"gpt-5.6-terra"}],"notice":{"keep":true}}`)},
+		&Group{ID: 1, Platform: PlatformOpenAI, ModelsListConfig: GroupModelsListConfig{Enforce: true}},
+		"",
+	)
+	require.NoError(t, err)
+	require.JSONEq(t, `{"models":[],"notice":{"keep":true}}`, string(filtered.Body))
+}
+
 type codexModelsBlockingBody struct {
 	ctx         context.Context
 	readStarted chan struct{}

@@ -13,6 +13,7 @@ import (
 
 	"github.com/Wei-Shaw/sub2api/internal/config"
 	"github.com/Wei-Shaw/sub2api/internal/pkg/ctxkey"
+	infraerrors "github.com/Wei-Shaw/sub2api/internal/pkg/errors"
 	"github.com/Wei-Shaw/sub2api/internal/pkg/ip"
 	"github.com/Wei-Shaw/sub2api/internal/pkg/logger"
 	"github.com/Wei-Shaw/sub2api/internal/securityaudit"
@@ -233,12 +234,6 @@ func (h *OpenAIGatewayHandler) Responses(c *gin.Context) {
 	if !ok {
 		return
 	}
-	// body-signal compact：上游 unary 等待期间向下游发 SSE 注释行心跳，防止
-	// 反向代理空闲超时掐断长压缩连接（#3887）。首拍延迟一个心跳间隔，快速
-	// 失败仍走 JSON+状态码链路；未标记客户端流式或间隔为 0 时是 no-op。
-	stopCompactKeepalive := service.StartOpenAICompactSSEKeepalive(c, h.openAICompactKeepaliveInterval())
-	defer stopCompactKeepalive()
-
 	// 校验请求体 JSON 合法性
 	if !gjson.ValidBytes(body) {
 		logRequestBodyParseFailure(reqLog, body, nil)
@@ -249,10 +244,16 @@ func (h *OpenAIGatewayHandler) Responses(c *gin.Context) {
 	// 使用 gjson 只读提取字段做校验，避免完整 Unmarshal
 	modelResult := gjson.GetBytes(body, "model")
 	if !modelResult.Exists() || modelResult.Type != gjson.String || modelResult.String() == "" {
+		if h.rejectOpenAIGroupModelPayload(c, apiKey, sessionHashBody, "model", "") {
+			return
+		}
 		h.errorResponse(c, http.StatusBadRequest, "invalid_request_error", "model is required")
 		return
 	}
 	reqModel := modelResult.String()
+	if h.rejectOpenAIGroupModelPayload(c, apiKey, sessionHashBody, "model", reqModel) {
+		return
+	}
 	if apiKey.Group != nil && apiKey.Group.Platform == service.PlatformOpenAI {
 		if cappedBody, changed := service.ApplyOpenAIReasoningEffortPolicy(body, apiKey.Group.MaxReasoningEffort, apiKey.Group.ReasoningEffortMappings); changed {
 			body = cappedBody
@@ -264,6 +265,11 @@ func (h *OpenAIGatewayHandler) Responses(c *gin.Context) {
 		h.errorResponse(c, http.StatusBadRequest, "invalid_request_error", invalidStreamFieldTypeMessage)
 		return
 	}
+	// body-signal compact：上游 unary 等待期间向下游发 SSE 注释行心跳，防止
+	// 反向代理空闲超时掐断长压缩连接（#3887）。白名单及基础字段校验先完成，
+	// 确保 model_not_allowed 等快速失败仍返回 HTTP 400 JSON。
+	stopCompactKeepalive := service.StartOpenAICompactSSEKeepalive(c, h.openAICompactKeepaliveInterval())
+	defer stopCompactKeepalive()
 	reqLog = reqLog.With(zap.String("model", reqModel), zap.Bool("stream", reqStream))
 	previousResponseID := strings.TrimSpace(gjson.GetBytes(body, "previous_response_id").String())
 	if previousResponseID != "" {
@@ -857,10 +863,16 @@ func (h *OpenAIGatewayHandler) Messages(c *gin.Context) {
 
 	modelResult := gjson.GetBytes(body, "model")
 	if !modelResult.Exists() || modelResult.Type != gjson.String || modelResult.String() == "" {
+		if h.rejectAnthropicOpenAIGroupModelPayload(c, apiKey, body, "model", "") {
+			return
+		}
 		h.anthropicErrorResponse(c, http.StatusBadRequest, "invalid_request_error", "model is required")
 		return
 	}
 	reqModel := modelResult.String()
+	if h.rejectAnthropicOpenAIGroupModelPayload(c, apiKey, body, "model", reqModel) {
+		return
+	}
 	routingModel := service.NormalizeOpenAICompatRequestedModel(reqModel)
 	preferredMappedModel := resolveOpenAIMessagesDispatchMappedModel(apiKey, reqModel)
 	reqStream := gjson.GetBytes(body, "stream").Bool()
@@ -1171,12 +1183,20 @@ func resolveOpenAIMessagesMetadataSession(sessionHash, promptCacheKey, reqModel 
 
 // anthropicErrorResponse writes an error in Anthropic Messages API format.
 func (h *OpenAIGatewayHandler) anthropicErrorResponse(c *gin.Context, status int, errType, message string) {
+	h.anthropicErrorResponseWithCode(c, status, errType, "", message)
+}
+
+func (h *OpenAIGatewayHandler) anthropicErrorResponseWithCode(c *gin.Context, status int, errType, code, message string) {
+	errorObject := gin.H{
+		"type":    errType,
+		"message": message,
+	}
+	if strings.TrimSpace(code) != "" {
+		errorObject["code"] = strings.TrimSpace(code)
+	}
 	c.JSON(status, gin.H{
-		"type": "error",
-		"error": gin.H{
-			"type":    errType,
-			"message": message,
-		},
+		"type":  "error",
+		"error": errorObject,
 	})
 }
 
@@ -1365,7 +1385,7 @@ func (h *OpenAIGatewayHandler) acquireResponsesAccountSlot(
 // GET /openai/v1/responses (Upgrade: websocket)
 func (h *OpenAIGatewayHandler) ResponsesWebSocket(c *gin.Context) {
 	if !isOpenAIWSUpgradeRequest(c.Request) {
-		h.errorResponse(c, http.StatusUpgradeRequired, "invalid_request_error", "WebSocket upgrade required (Upgrade: websocket)")
+		h.errorResponse(c, http.StatusBadRequest, "invalid_request_error", "WebSocket upgrade required (Upgrade: websocket)")
 		return
 	}
 	setOpenAIClientTransportWS(c)
@@ -1471,7 +1491,32 @@ func (h *OpenAIGatewayHandler) ResponsesWebSocket(c *gin.Context) {
 		closeOpenAIClientWS(wsConn, coderws.StatusPolicyViolation, "invalid JSON payload")
 		return
 	}
-	reqModel := strings.TrimSpace(gjson.GetBytes(firstMessage, "model").String())
+	// The first client event establishes the Responses WebSocket session and
+	// must be a response.create event.  Older clients omitted `type`, so keep
+	// that compatibility path (the ingress adapter normalizes it); an explicit
+	// non-string/unknown event must not be mistaken for a response request.
+	firstType := gjson.GetBytes(firstMessage, "type")
+	if firstType.Exists() {
+		if firstType.Type != gjson.String {
+			closeOpenAIClientWS(wsConn, coderws.StatusPolicyViolation, "first websocket message must be response.create")
+			return
+		}
+		firstTypeName := strings.TrimSpace(firstType.String())
+		if firstTypeName != "" && firstTypeName != "response.create" {
+			closeOpenAIClientWS(wsConn, coderws.StatusPolicyViolation, "first websocket message must be response.create")
+			return
+		}
+	}
+	modelResult := gjson.GetBytes(firstMessage, "model")
+	reqModel := ""
+	if modelResult.Type == gjson.String {
+		reqModel = strings.TrimSpace(modelResult.String())
+	}
+	if modelErr := validateOpenAIWSGroupModel(apiKey.Group, firstMessage, reqModel); modelErr != nil {
+		writeModelNotAllowedWSError(ctx, wsConn, modelErr)
+		closeOpenAIClientWS(wsConn, coderws.StatusPolicyViolation, infraerrors.Message(modelErr))
+		return
+	}
 	if reqModel == "" {
 		closeOpenAIClientWS(wsConn, coderws.StatusPolicyViolation, "model is required in first response.create payload")
 		return
@@ -1749,12 +1794,14 @@ func (h *OpenAIGatewayHandler) ResponsesWebSocket(c *gin.Context) {
 				if !gjson.ValidBytes(payload) {
 					return service.NewOpenAIWSClientCloseError(coderws.StatusPolicyViolation, "invalid websocket request payload", errors.New("invalid json"))
 				}
-				model := strings.TrimSpace(originalModel)
-				if model == "" {
-					model = strings.TrimSpace(gjson.GetBytes(payload, "model").String())
-				}
-				if model == "" {
-					model = reqModel
+				// Validate client-facing response.create/session.update model fields
+				// before the WS adapter performs account or channel model mapping.
+				// Omitted follow-up models reuse an already validated session/initial
+				// model supplied by the adapter.
+				model := openAIWSRequestedModelForWhitelist(payload, originalModel, reqModel)
+				if modelErr := validateOpenAIWSGroupModel(apiKey.Group, payload, model); modelErr != nil {
+					writeModelNotAllowedWSError(ctx, wsConn, modelErr)
+					return service.NewOpenAIWSClientCloseError(coderws.StatusPolicyViolation, infraerrors.Message(modelErr), modelErr)
 				}
 				if decision := h.checkSecurityAuditStage(c, reqLog, apiKey, subject, service.ContentModerationProtocolOpenAIResponses, model, payload, "subsequent_turn"); decision != nil && !decision.AllowNextStage {
 					writeSecurityAuditWSError(ctx, wsConn, decision)
@@ -1906,6 +1953,18 @@ func (h *OpenAIGatewayHandler) ResponsesWebSocket(c *gin.Context) {
 					zap.String("reason", closeErr.Reason()),
 				)
 				closeOpenAIClientWS(wsConn, closeErr.StatusCode(), closeErr.Reason())
+				return
+			}
+			if infraerrors.Reason(err) == service.ModelNotAllowedErrorCode {
+				reqLog.Info("openai.websocket_model_not_allowed",
+					zap.Int64("account_id", account.ID),
+					zap.String("reason", infraerrors.Message(err)),
+				)
+				if closeErr != nil {
+					closeOpenAIClientWS(wsConn, closeErr.StatusCode(), closeErr.Reason())
+				} else {
+					closeOpenAIClientWS(wsConn, coderws.StatusPolicyViolation, infraerrors.Message(err))
+				}
 				return
 			}
 
@@ -2439,19 +2498,27 @@ func openAIFirstOutputFailoverExhausted(failoverErr *service.UpstreamFailoverErr
 
 // errorResponse returns OpenAI API format error response
 func (h *OpenAIGatewayHandler) errorResponse(c *gin.Context, status int, errType, message string) {
+	h.errorResponseWithCode(c, status, errType, "", message)
+}
+
+func (h *OpenAIGatewayHandler) errorResponseWithCode(c *gin.Context, status int, errType, code, message string) {
 	// body-signal compact 心跳可能已把响应头提交为 200：JSON 错误体会与已
 	// 提交的 SSE 流交错，必须降级为 response.failed 终止事件（#3887）。
 	if service.StopOpenAICompactSSEKeepaliveCommitted(c) {
 		service.MarkOpsStreamError(c, errType, message, status)
-		if writeResponsesFailedSSE(c, errType, message) {
+		if writeResponsesFailedSSEWithCode(c, errType, code, message) {
 			return
 		}
 	}
+	errorObject := gin.H{
+		"type":    errType,
+		"message": message,
+	}
+	if strings.TrimSpace(code) != "" {
+		errorObject["code"] = strings.TrimSpace(code)
+	}
 	c.JSON(status, gin.H{
-		"error": gin.H{
-			"type":    errType,
-			"message": message,
-		},
+		"error": errorObject,
 	})
 }
 

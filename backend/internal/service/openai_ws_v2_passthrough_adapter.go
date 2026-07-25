@@ -1,6 +1,7 @@
 package service
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"fmt"
@@ -17,6 +18,7 @@ import (
 	coderws "github.com/coder/websocket"
 	"github.com/gin-gonic/gin"
 	"github.com/tidwall/gjson"
+	"github.com/tidwall/sjson"
 )
 
 type openAIWSClientFrameConn struct {
@@ -187,14 +189,88 @@ func openAIWSPassthroughRequestModelForFrame(payload []byte) string {
 	if len(payload) == 0 || strings.TrimSpace(gjson.GetBytes(payload, "type").String()) != "response.create" {
 		return ""
 	}
-	return strings.TrimSpace(gjson.GetBytes(payload, "model").String())
+	model := gjson.GetBytes(payload, "model")
+	if model.Type != gjson.String {
+		return ""
+	}
+	return strings.TrimSpace(model.String())
 }
 
 func openAIWSPassthroughRequestModelFromSessionFrame(payload []byte) string {
 	if len(payload) == 0 || strings.TrimSpace(gjson.GetBytes(payload, "type").String()) != "session.update" {
 		return ""
 	}
-	return strings.TrimSpace(gjson.GetBytes(payload, "session.model").String())
+	model := gjson.GetBytes(payload, "session.model")
+	if model.Type != gjson.String {
+		return ""
+	}
+	return strings.TrimSpace(model.String())
+}
+
+func openAIWSPassthroughModelField(payload []byte, path string) (string, bool) {
+	result := gjson.GetBytes(payload, path)
+	if !result.Exists() {
+		return "", false
+	}
+	if result.Type != gjson.String {
+		return "", true
+	}
+	return strings.TrimSpace(result.String()), true
+}
+
+// normalizeOpenAIWSPassthroughClientEventType validates the client event type
+// before any per-frame model policy runs. Legacy clients sometimes omit the
+// first/follow-up type field; preserve that compatibility by normalizing a
+// missing or blank value to response.create. An explicit non-string type and
+// malformed JSON fail closed instead of bypassing model validation and being
+// forwarded as an unclassified control frame.
+func normalizeOpenAIWSPassthroughClientEventType(payload []byte) (string, []byte, error) {
+	payload = bytes.TrimSpace(payload)
+	if len(payload) == 0 || !gjson.ValidBytes(payload) {
+		return "", payload, errors.New("invalid websocket request payload")
+	}
+	typeResult := gjson.GetBytes(payload, "type")
+	if typeResult.Exists() && typeResult.Type != gjson.String {
+		return "", payload, errors.New("websocket event type must be a string")
+	}
+	eventType := strings.TrimSpace(typeResult.String())
+	if eventType != "" {
+		return eventType, payload, nil
+	}
+	normalized, err := sjson.SetBytes(payload, "type", "response.create")
+	if err != nil {
+		return "", payload, fmt.Errorf("normalize websocket event type: %w", err)
+	}
+	return "response.create", normalized, nil
+}
+
+// openAIWSPassthroughClientModelForValidation identifies frames that can set
+// the client-visible model before any account mapping occurs. A response.create
+// without an explicit model reuses the already validated raw session model;
+// session.update is validated immediately so a forbidden model is never sent
+// upstream and cannot become the fallback for a later turn.
+func openAIWSPassthroughClientModelForValidation(payload []byte, sessionModel string) (string, bool) {
+	switch strings.TrimSpace(gjson.GetBytes(payload, "type").String()) {
+	case "response.create":
+		if model, present := openAIWSPassthroughModelField(payload, "model"); present {
+			return model, true
+		}
+		model := strings.TrimSpace(sessionModel)
+		if model == "" {
+			// A response.create frame without a model still needs validation;
+			// the caller will fail closed when no validated session model exists.
+			return "", true
+		}
+		return model, true
+	case "session.update":
+		model, present := openAIWSPassthroughModelField(payload, "session.model")
+		if !present {
+			return "", false
+		}
+		return model, true
+	default:
+		return "", false
+	}
 }
 
 const openaiWSV2PassthroughModeFields = "ws_mode=passthrough ws_router=v2"
@@ -620,6 +696,17 @@ func (s *OpenAIGatewayService) proxyResponsesWebSocketV2Passthrough(
 	if err := validateOpenAIWSBearerToken(account, token); err != nil {
 		return err
 	}
+	// Keep the passthrough adapter defensive when it is called directly (the
+	// HTTP handler performs the same check before account scheduling).
+	firstTypeName, normalizedFirstMessage, firstTypeErr := normalizeOpenAIWSPassthroughClientEventType(firstClientMessage)
+	if firstTypeErr != nil || firstTypeName != "response.create" {
+		return NewOpenAIWSClientCloseError(
+			coderws.StatusPolicyViolation,
+			"first websocket message must be response.create",
+			firstTypeErr,
+		)
+	}
+	firstClientMessage = normalizedFirstMessage
 	if account.IsOpenAIOAuth() && isOpenAIResponsesLiteWebSocketPayload(firstClientMessage) {
 		liteFirstMessage, _, liteErr := normalizeOpenAIResponsesLiteToolsPayload(firstClientMessage)
 		if liteErr != nil {
@@ -847,10 +934,14 @@ func (s *OpenAIGatewayService) proxyResponsesWebSocketV2Passthrough(
 		// capturedSessionModel 的读写都发生在该 goroutine 内，因此无需
 		// 加锁/原子化。
 		filter: func(msgType coderws.MessageType, payload []byte) (out []byte, blocked *OpenAIFastBlockedError, filterErr error) {
-			if msgType != coderws.MessageText {
+			if msgType != coderws.MessageText && msgType != coderws.MessageBinary {
 				return payload, nil, nil
 			}
-			eventType := strings.TrimSpace(gjson.GetBytes(payload, "type").String())
+			eventType, normalizedPayload, typeErr := normalizeOpenAIWSPassthroughClientEventType(payload)
+			if typeErr != nil {
+				return payload, nil, NewOpenAIWSClientCloseError(coderws.StatusPolicyViolation, typeErr.Error(), typeErr)
+			}
+			payload = normalizedPayload
 			isResponseCreate := eventType == "response.create"
 			acceptedTurn := false
 			if isResponseCreate {
@@ -878,16 +969,13 @@ func (s *OpenAIGatewayService) proxyResponsesWebSocketV2Passthrough(
 					}
 				}
 			}
-			if isResponseCreate && hooks != nil && hooks.BeforeRequest != nil {
+			validationModel, validateModel := openAIWSPassthroughClientModelForValidation(payload, usageMeta.requestModelForFrame(payload))
+			if validateModel && hooks != nil && hooks.BeforeRequest != nil {
 				turnNo := int(completedTurns.Load()) + 1
 				if turnNo < 2 {
 					turnNo = 2
 				}
-				requestModel := usageMeta.requestModelForFrame(payload)
-				if requestModel == "" {
-					requestModel = capturedSessionModel
-				}
-				if err := hooks.BeforeRequest(turnNo, payload, requestModel); err != nil {
+				if err := hooks.BeforeRequest(turnNo, payload, validationModel); err != nil {
 					return payload, nil, err
 				}
 			}
@@ -966,7 +1054,7 @@ func (s *OpenAIGatewayService) proxyResponsesWebSocketV2Passthrough(
 			if readErr != nil {
 				return msgType, payload, readErr
 			}
-			if msgType == coderws.MessageText && strings.TrimSpace(gjson.GetBytes(payload, "type").String()) == "response.create" {
+			if (msgType == coderws.MessageText || msgType == coderws.MessageBinary) && strings.TrimSpace(gjson.GetBytes(payload, "type").String()) == "response.create" {
 				return msgType, payload, nil
 			}
 			if writeErr := upstreamFrameConn.WriteFrame(readCtx, msgType, payload); writeErr != nil {

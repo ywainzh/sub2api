@@ -58,6 +58,42 @@ func TestPromptAuditGatePrecedesAccountBillingAndUpstreamSideEffects(t *testing.
 	}
 }
 
+func TestModelWhitelistGatePrecedesMappingBillingSchedulingAndTaskSideEffects(t *testing.T) {
+	tests := []promptAuditOrderCase{
+		{file: "openai_gateway_handler.go", function: "Responses", auditToken: "rejectOpenAIGroupModel"},
+		{file: "openai_gateway_handler.go", function: "Messages", auditToken: "rejectAnthropicOpenAIGroupModel"},
+		{file: "openai_chat_completions.go", function: "ChatCompletions", auditToken: "rejectOpenAIGroupModel"},
+		{file: "openai_embeddings.go", function: "Embeddings", auditToken: "rejectOpenAIGroupModel"},
+		{file: "openai_alpha_search.go", function: "AlphaSearch", auditToken: "rejectOpenAIGroupModel"},
+		{file: "openai_gateway_count_tokens.go", function: "CountTokens", auditToken: "rejectAnthropicOpenAIGroupModel"},
+		{file: "openai_images.go", function: "Images", auditToken: "ParseOpenAIImagesRequestForGroup"},
+		{file: "image_task_handler.go", function: "Submit", auditToken: "validateRequestForGroup"},
+		{file: "batch_image_handler.go", function: "Submit", auditToken: "ValidateOpenAIGroupModel"},
+	}
+	sideEffectTokens := []string{
+		"checkSecurityAudit", "ResolveChannelMappingAndRestrict(", "CheckBillingEligibility(",
+		"SelectAccount", ".Forward", "acquireResponsesUserSlot(", "acquireImageGenerationSlot(",
+		"h.tasks.Create(", "h.tasks.CreateForGroup(", "h.service.Submit(",
+	}
+	for _, tt := range tests {
+		t.Run(tt.file+"/"+tt.function, func(t *testing.T) {
+			functionSource := stripGoComments(goFunctionSource(t, tt.file, tt.function))
+			gateIndex := strings.Index(functionSource, tt.auditToken)
+			require.NotEqual(t, -1, gateIndex, "missing strict model whitelist gate")
+			foundSideEffect := false
+			for _, sideEffect := range sideEffectTokens {
+				index := strings.Index(functionSource, sideEffect)
+				if index < 0 {
+					continue
+				}
+				foundSideEffect = true
+				require.Lessf(t, gateIndex, index, "%s must run before %s", tt.auditToken, sideEffect)
+			}
+			require.True(t, foundSideEffect, "coverage case must contain a downstream side effect")
+		})
+	}
+}
+
 func stripGoComments(source string) string {
 	source = regexp.MustCompile(`(?s)/\*.*?\*/`).ReplaceAllString(source, "")
 	return regexp.MustCompile(`(?m)//.*$`).ReplaceAllString(source, "")

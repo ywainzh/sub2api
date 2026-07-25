@@ -151,8 +151,15 @@ func (s *ImageTaskService) ExecutionTimeout() time.Duration {
 }
 
 func (s *ImageTaskService) Create(ctx context.Context, owner ImageTaskOwner) (*ImageTask, error) {
+	return s.CreateForGroup(ctx, owner, nil, "")
+}
+
+func (s *ImageTaskService) CreateForGroup(ctx context.Context, owner ImageTaskOwner, group *Group, requestedModel string) (*ImageTask, error) {
 	if s == nil || s.store == nil {
 		return nil, ErrImageTaskUnavailable
+	}
+	if err := ValidateOpenAIGroupModel(group, requestedModel); err != nil {
+		return nil, err
 	}
 	now := time.Now().UTC()
 	task := &ImageTaskRecord{

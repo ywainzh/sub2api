@@ -204,6 +204,9 @@ func (s *BatchImagePublicService) Submit(ctx context.Context, owner BatchImageOw
 	if err != nil {
 		return nil, err
 	}
+	if err := s.validateOwnerGroupModel(ctx, owner.GroupID, normalized.Model); err != nil {
+		return nil, err
+	}
 	// 与 ListModels 使用同一鉴权谓词（AllowBatchImageGeneration + Platform==Gemini），
 	// 避免两个入口校验口径不一致留下防御纵深缺口。
 	if err := s.ensureGroupAllowsBatchImage(ctx, owner.GroupID); err != nil {
@@ -972,6 +975,20 @@ func (s *BatchImagePublicService) listCandidateAccounts(ctx context.Context, gro
 		return s.AccountRepo.ListSchedulableByGroupIDAndPlatform(ctx, *groupID, platform)
 	}
 	return s.AccountRepo.ListSchedulableByPlatform(ctx, platform)
+}
+
+func (s *BatchImagePublicService) validateOwnerGroupModel(ctx context.Context, groupID *int64, model string) error {
+	if groupID == nil || *groupID <= 0 {
+		return nil
+	}
+	if s.GroupRepo == nil {
+		return ErrBatchImageSettlementPricingMissing
+	}
+	group, err := s.GroupRepo.GetByIDLite(ctx, *groupID)
+	if err != nil || group == nil {
+		return ErrBatchImageSettlementPricingMissing
+	}
+	return ValidateOpenAIGroupModel(group, model)
 }
 
 func (s *BatchImagePublicService) ensureGroupAllowsBatchImage(ctx context.Context, groupID *int64) error {

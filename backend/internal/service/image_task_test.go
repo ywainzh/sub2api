@@ -8,6 +8,7 @@ import (
 	"testing"
 	"time"
 
+	infraerrors "github.com/Wei-Shaw/sub2api/internal/pkg/errors"
 	"github.com/stretchr/testify/require"
 )
 
@@ -88,4 +89,27 @@ func TestImageTaskServiceMapsStoreFailures(t *testing.T) {
 
 	_, err := svc.Create(context.Background(), ImageTaskOwner{UserID: 1, APIKeyID: 2})
 	require.ErrorIs(t, err, ErrImageTaskUnavailable)
+}
+
+func TestImageTaskServiceRejectsDisallowedModelBeforeSaving(t *testing.T) {
+	store := &imageTaskMemoryStore{}
+	svc := NewImageTaskServiceWithOptions(store, time.Hour, time.Minute)
+	group := &Group{
+		Platform: PlatformOpenAI,
+		ModelsListConfig: GroupModelsListConfig{
+			Enforce: true,
+			Models:  []string{"gpt-image-1"},
+		},
+	}
+
+	_, err := svc.CreateForGroup(
+		context.Background(),
+		ImageTaskOwner{UserID: 1, APIKeyID: 2},
+		group,
+		"gpt-image-1.5",
+	)
+
+	require.Error(t, err)
+	require.Equal(t, ModelNotAllowedErrorCode, infraerrors.Reason(err))
+	require.Nil(t, store.task)
 }
