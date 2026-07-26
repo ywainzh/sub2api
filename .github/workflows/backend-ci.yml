@@ -17,7 +17,7 @@ jobs:
           /bin/bash -n deploy/apple-container.sh
           /bin/bash deploy/tests/apple-container-test.sh
 
-  test:
+  unit_test:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v6
@@ -33,9 +33,38 @@ jobs:
       - name: Unit tests
         working-directory: backend
         run: make test-unit
+
+  integration_test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/setup-go@v6
+        with:
+          go-version-file: backend/go.mod
+          check-latest: false
+          cache: true
+          cache-dependency-path: backend/go.sum
+      - name: Verify Go version
+        run: |
+          go version | grep -q 'go1.26.5'
       - name: Integration tests
         working-directory: backend
         run: make test-integration
+
+  test:
+    if: ${{ always() }}
+    needs:
+      - unit_test
+      - integration_test
+    runs-on: ubuntu-latest
+    steps:
+      - name: Verify backend test jobs
+        env:
+          UNIT_RESULT: ${{ needs.unit_test.result }}
+          INTEGRATION_RESULT: ${{ needs.integration_test.result }}
+        run: |
+          test "${UNIT_RESULT}" = success
+          test "${INTEGRATION_RESULT}" = success
 
   frontend:
     runs-on: ubuntu-latest

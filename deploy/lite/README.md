@@ -25,7 +25,7 @@ v0.1.0 -> v0.1.1 -> v0.1.2
 - 只有在明确规划功能阶段时才升级中间位，例如 `v0.2.0`；不要使用日期、`latest`、`release-*` 或重推已有 tag。
 - `release-2026.07.22-*` 是早期部署记录，仅用于审计和回滚参考；新版本一律使用 `vX.Y.Z`。
 
-`Publish Lite Release` 只接受 `release` 分支上的 `vX.Y.Z` tag。它会执行前端类型检查和构建、后端全量测试、`linux/amd64` 编译、Compose 校验、GHCR 推送、匿名拉取校验和 GitHub Release 创建。上游的 `Release` 工作流已与本 fork 的版本 tag 隔离，不会再修改 `main`。
+`Publish Lite Release` 只接受 `release` 分支最新提交上的 `vX.Y.Z` tag。它会执行前端类型检查和构建、后端全量测试、`linux/amd64` 编译、Compose 校验、GHCR 推送、匿名拉取校验和 GitHub Release 创建。后端代码有修改时仍必须重新编译一次 Go 二进制；前端构建、后端测试和二进制构建会在 GitHub Actions 中安全并行，通常约 5 分钟完成。服务器始终只拉取预编译镜像，不参与编译。上游的 `Release` 工作流已与本 fork 的版本 tag 隔离，不会再修改 `main`。
 
 ## 发布新版本
 

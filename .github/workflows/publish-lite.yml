@@ -6,17 +6,16 @@ on:
       - "v*"
 
 permissions:
-  contents: write
-  packages: write
+  contents: read
+  packages: read
 
 concurrency:
   group: publish-lite-${{ github.ref }}
   cancel-in-progress: false
 
 jobs:
-  publish:
+  verify:
     runs-on: ubuntu-latest
-
     steps:
       - name: Check out tagged source
         uses: actions/checkout@v6
@@ -33,10 +32,18 @@ jobs:
           fi
           git fetch origin release
           tag_commit="$(git rev-list -n 1 "${GITHUB_REF_NAME}")"
-          if ! git merge-base --is-ancestor "${tag_commit}" origin/release; then
-            echo "Tag ${GITHUB_REF_NAME} is not based on origin/release" >&2
+          release_commit="$(git rev-parse origin/release)"
+          if [[ "${tag_commit}" != "${release_commit}" ]]; then
+            echo "Tag ${GITHUB_REF_NAME} must point to the current origin/release tip" >&2
             exit 1
           fi
+
+  frontend:
+    needs: verify
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out tagged source
+        uses: actions/checkout@v6
 
       - name: Set up pnpm
         uses: pnpm/action-setup@v6
@@ -58,7 +65,22 @@ jobs:
         working-directory: frontend
         run: |
           pnpm run typecheck
-          pnpm run build
+          pnpm exec vite build
+
+      - name: Upload embedded frontend
+        uses: actions/upload-artifact@v4
+        with:
+          name: embedded-frontend
+          path: backend/internal/web/dist
+          if-no-files-found: error
+          retention-days: 1
+
+  backend_test:
+    needs: verify
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out tagged source
+        uses: actions/checkout@v6
 
       - name: Set up Go
         uses: actions/setup-go@v6
@@ -71,30 +93,41 @@ jobs:
         working-directory: backend
         run: go test ./...
 
+  build_binary:
+    needs:
+      - verify
+      - frontend
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out tagged source
+        uses: actions/checkout@v6
+
+      - name: Download embedded frontend
+        uses: actions/download-artifact@v4
+        with:
+          name: embedded-frontend
+          path: backend/internal/web/dist
+
+      - name: Set up Go
+        uses: actions/setup-go@v6
+        with:
+          go-version-file: backend/go.mod
+          check-latest: false
+          cache-dependency-path: backend/go.sum
+
       - name: Build linux/amd64 binary
         working-directory: backend
         shell: bash
         run: |
           set -euo pipefail
           build_date="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+          source_commit="$(git rev-parse HEAD)"
           CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build \
             -tags embed \
             -trimpath \
-            -ldflags="-s -w -X main.Version=${GITHUB_REF_NAME} -X main.Commit=${GITHUB_SHA} -X main.Date=${build_date} -X main.BuildType=release" \
+            -ldflags="-s -w -X main.Version=${GITHUB_REF_NAME} -X main.Commit=${source_commit} -X main.Date=${build_date} -X main.BuildType=release" \
             -o ../sub2api \
             ./cmd/server
-
-      - name: Validate lite Compose configuration
-        shell: bash
-        env:
-          APP_IMAGE: ghcr.io/ywainzh/sub2api:${{ github.ref_name }}
-          DOCKER_GID: 121
-          POSTGRES_PASSWORD: ci-postgres-password
-          REDIS_PASSWORD: ci-redis-password
-          JWT_SECRET: 0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef
-          TOTP_ENCRYPTION_KEY: 0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef
-          ADMIN_PASSWORD: ci-admin-password
-        run: docker compose -f deploy/lite/docker-compose.yml config --quiet
 
       - name: Package release assets
         shell: bash
@@ -110,6 +143,53 @@ jobs:
           tar -czf "release-assets/sub2api-deploy-${GITHUB_REF_NAME}.tar.gz" -C "${deploy_dir}" .
           cd release-assets
           sha256sum sub2api-linux-amd64.tar.gz "sub2api-deploy-${GITHUB_REF_NAME}.tar.gz" > checksums.txt
+
+      - name: Upload release inputs
+        shell: bash
+        run: |
+          tar -czf publish-inputs.tar.gz sub2api release-assets
+
+      - name: Store release inputs
+        uses: actions/upload-artifact@v4
+        with:
+          name: release-inputs
+          path: publish-inputs.tar.gz
+          if-no-files-found: error
+          retention-days: 1
+
+  publish:
+    needs:
+      - backend_test
+      - build_binary
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      packages: write
+    steps:
+      - name: Check out tagged source
+        uses: actions/checkout@v6
+        with:
+          persist-credentials: false
+
+      - name: Download release inputs
+        uses: actions/download-artifact@v4
+        with:
+          name: release-inputs
+
+      - name: Restore release inputs
+        run: tar -xzf publish-inputs.tar.gz
+
+      - name: Validate lite Compose configuration
+        shell: bash
+        env:
+          APP_IMAGE: ghcr.io/ywainzh/sub2api:${{ github.ref_name }}
+          DOCKER_GID: 121
+          POSTGRES_PASSWORD: ci-postgres-password
+          REDIS_PASSWORD: ci-redis-password
+          JWT_SECRET: 0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef
+          TOTP_ENCRYPTION_KEY: 0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef
+          ADMIN_PASSWORD: ci-admin-password
+        run: docker compose -f deploy/lite/docker-compose.yml config --quiet
 
       - name: Log in to GHCR
         uses: docker/login-action@v3
@@ -127,12 +207,13 @@ jobs:
         run: |
           set -euo pipefail
           image="ghcr.io/${GITHUB_REPOSITORY,,}:${GITHUB_REF_NAME}"
+          source_commit="$(git rev-parse HEAD)"
           docker buildx build \
             --platform linux/amd64 \
             --file Dockerfile.goreleaser \
             --label "org.opencontainers.image.source=https://github.com/${GITHUB_REPOSITORY}" \
             --label "org.opencontainers.image.version=${GITHUB_REF_NAME}" \
-            --label "org.opencontainers.image.revision=${GITHUB_SHA}" \
+            --label "org.opencontainers.image.revision=${source_commit}" \
             --cache-from type=gha \
             --cache-to type=gha,mode=max \
             --tag "${image}" \
@@ -155,11 +236,12 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
+          source_commit="$(git rev-parse HEAD)"
           cat > release-assets/release-notes.md <<EOF
           ## Lite deployment release
 
           - Source branch: \`release\`
-          - Source commit: \`${GITHUB_SHA}\`
+          - Source commit: \`${source_commit}\`
           - Runtime image: \`${IMAGE_NAME}\`
           - Architecture: \`linux/amd64\`
 
