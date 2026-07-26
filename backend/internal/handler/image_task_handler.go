@@ -206,14 +206,6 @@ func (h *AsyncImageHandler) Get(c *gin.Context) {
 	c.JSON(http.StatusOK, task)
 }
 
-// validateRequest keeps the legacy helper signature for internal callers and
-// tests; request submission uses validateRequestForGroup so strict group
-// validation happens before image-model capability checks.
-func (h *AsyncImageHandler) validateRequest(c *gin.Context, platform string, body []byte) error {
-	_, _, err := h.validateRequestForGroup(c, platform, body, nil)
-	return err
-}
-
 func (h *AsyncImageHandler) validateRequestForGroup(c *gin.Context, platform string, body []byte, group *service.Group) (string, bool, error) {
 	if h.openAI == nil || h.openAI.gatewayService == nil {
 		return "", false, nil
