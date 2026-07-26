@@ -278,10 +278,20 @@ func TestCodexWindowStatsStartUsesReportedWindowLength(t *testing.T) {
 		}
 	})
 
+	t.Run("active 5 hour window uses cycle start", func(t *testing.T) {
+		fiveHourResetAt := now.Add(2 * time.Hour)
+		progress := &UsageProgress{WindowMinutes: 5 * 60, ResetsAt: &fiveHourResetAt}
+		got := codexWindowStatsStart(progress, 5*time.Hour, now)
+		want := fiveHourResetAt.Add(-5 * time.Hour)
+		if !got.Equal(want) {
+			t.Fatalf("codexWindowStatsStart() = %v, want %v", got, want)
+		}
+	})
+
 	t.Run("missing window length falls back", func(t *testing.T) {
 		progress := &UsageProgress{ResetsAt: &resetAt}
 		got := codexWindowStatsStart(progress, 7*24*time.Hour, now)
-		want := resetAt.Add(-7 * 24 * time.Hour)
+		want := now.Add(-7 * 24 * time.Hour)
 		if !got.Equal(want) {
 			t.Fatalf("codexWindowStatsStart() = %v, want %v", got, want)
 		}
@@ -290,18 +300,29 @@ func TestCodexWindowStatsStartUsesReportedWindowLength(t *testing.T) {
 	t.Run("invalid window length falls back", func(t *testing.T) {
 		progress := &UsageProgress{WindowMinutes: 2 * 366 * 24 * 60, ResetsAt: &resetAt}
 		got := codexWindowStatsStart(progress, 5*time.Hour, now)
-		want := resetAt.Add(-5 * time.Hour)
+		want := now.Add(-5 * time.Hour)
 		if !got.Equal(want) {
 			t.Fatalf("codexWindowStatsStart() = %v, want %v", got, want)
 		}
 	})
 
-	t.Run("expired window starts a fresh cycle", func(t *testing.T) {
+	t.Run("expired window falls back to rolling lookback", func(t *testing.T) {
 		expiredResetAt := now.Add(-time.Minute)
 		progress := &UsageProgress{WindowMinutes: 30 * 24 * 60, ResetsAt: &expiredResetAt}
 		got := codexWindowStatsStart(progress, 7*24*time.Hour, now)
-		if !got.Equal(now) {
-			t.Fatalf("codexWindowStatsStart() = %v, want %v", got, now)
+		want := now.Add(-30 * 24 * time.Hour)
+		if !got.Equal(want) {
+			t.Fatalf("codexWindowStatsStart() = %v, want %v", got, want)
+		}
+	})
+
+	t.Run("reset beyond window never creates a future query", func(t *testing.T) {
+		futureResetAt := now.Add(6 * time.Hour)
+		progress := &UsageProgress{WindowMinutes: 0, ResetsAt: &futureResetAt}
+		got := codexWindowStatsStart(progress, 5*time.Hour, now)
+		want := now.Add(-5 * time.Hour)
+		if !got.Equal(want) {
+			t.Fatalf("codexWindowStatsStart() = %v, want %v", got, want)
 		}
 	})
 }

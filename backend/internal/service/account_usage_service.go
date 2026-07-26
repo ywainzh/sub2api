@@ -1409,13 +1409,14 @@ func codexWindowStatsStart(progress *UsageProgress, fallbackWindow time.Duration
 	if progress != nil && progress.WindowMinutes > 0 && progress.WindowMinutes <= maxSupportedWindowMinutes {
 		window = time.Duration(progress.WindowMinutes) * time.Minute
 	}
-	if progress != nil && progress.ResetsAt != nil {
-		if now.Before(*progress.ResetsAt) {
-			return progress.ResetsAt.Add(-window)
+	fallbackStart := now.Add(-window)
+	if progress != nil && progress.ResetsAt != nil && now.Before(*progress.ResetsAt) {
+		windowStart := progress.ResetsAt.Add(-window)
+		if !windowStart.After(now) {
+			return windowStart
 		}
-		return now
 	}
-	return now.Add(-window)
+	return fallbackStart
 }
 
 func (s *AccountUsageService) GetAccountUsageStats(ctx context.Context, accountID int64, startTime, endTime time.Time) (*usagestats.AccountUsageStatsResponse, error) {
