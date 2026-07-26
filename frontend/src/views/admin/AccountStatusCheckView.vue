@@ -28,18 +28,17 @@
       </header>
 
       <section class="card" :aria-busy="running">
-        <div class="card-header">
-          <div class="flex items-center gap-2">
-            <Icon name="beaker" size="md" class="text-primary-500" />
-            <h2 class="font-semibold text-gray-900 dark:text-white">
+        <div class="px-5 py-4 sm:px-6">
+          <div class="mb-4 flex items-center gap-2">
+            <Icon name="beaker" size="sm" class="text-primary-500" />
+            <h2 class="text-sm font-semibold text-gray-900 dark:text-white">
               {{ t('admin.accounts.statusCheck.configuration') }}
             </h2>
           </div>
-        </div>
-        <div class="card-body space-y-5">
+
           <div
             v-if="loadError"
-            class="flex items-start gap-3 rounded-xl border border-red-200 bg-red-50 p-4 text-sm text-red-700 dark:border-red-800/60 dark:bg-red-950/30 dark:text-red-200"
+            class="mb-4 flex items-start gap-3 rounded-lg border border-red-200 bg-red-50 p-3 text-sm text-red-700 dark:border-red-800/60 dark:bg-red-950/30 dark:text-red-200"
             role="alert"
           >
             <Icon name="exclamationCircle" size="md" class="mt-0.5 flex-shrink-0" />
@@ -48,7 +47,7 @@
 
           <div
             v-if="!groupsLoading && groupOptions.length === 0"
-            class="flex items-start gap-3 rounded-xl border border-amber-200 bg-amber-50 p-4 text-sm text-amber-800 dark:border-amber-800/60 dark:bg-amber-950/30 dark:text-amber-200"
+            class="mb-4 flex items-start gap-3 rounded-lg border border-amber-200 bg-amber-50 p-3 text-sm text-amber-800 dark:border-amber-800/60 dark:bg-amber-950/30 dark:text-amber-200"
             role="status"
           >
             <Icon name="exclamationTriangle" size="md" class="mt-0.5 flex-shrink-0" />
@@ -60,7 +59,7 @@
             </div>
           </div>
 
-          <div class="grid gap-4 lg:grid-cols-3">
+          <div class="grid gap-3 lg:grid-cols-3 xl:grid-cols-[repeat(3,minmax(0,1fr))_auto] xl:items-end">
             <div>
               <label for="status-check-group" class="input-label">
                 {{ t('admin.accounts.statusCheck.groupLabel') }}
@@ -70,7 +69,7 @@
                 v-model="selectedGroupId"
                 :options="groupOptions"
                 :placeholder="groupsLoading ? t('common.loading') : t('admin.accounts.statusCheck.groupPlaceholder')"
-                :disabled="running || groupsLoading"
+                :disabled="running || clearingCategory !== null || groupsLoading"
                 :searchable="true"
                 :empty-text="t('admin.accounts.statusCheck.noGroups')"
                 :aria-label="t('admin.accounts.statusCheck.groupLabel')"
@@ -86,7 +85,7 @@
                 v-model="selectedModelId"
                 :options="modelOptions"
                 :placeholder="modelsLoading ? t('common.loading') : t('admin.accounts.statusCheck.modelPlaceholder')"
-                :disabled="running || modelsLoading || selectedGroupId === null"
+                :disabled="running || clearingCategory !== null || modelsLoading || selectedGroupId === null"
                 :searchable="true"
                 :creatable="true"
                 :creatable-prefix="t('admin.accounts.statusCheck.useCustomModel')"
@@ -118,19 +117,17 @@
                 id="status-check-mode"
                 v-model="selectedMode"
                 :options="modeOptions"
-                :disabled="running"
+                :disabled="running || clearingCategory !== null"
                 :searchable="false"
                 :aria-label="t('admin.accounts.statusCheck.modeLabel')"
               />
             </div>
-          </div>
 
-          <div class="flex flex-col gap-3 border-t border-gray-100 pt-5 dark:border-dark-700 sm:flex-row sm:items-center sm:justify-end">
-            <div class="flex flex-wrap gap-3">
+            <div class="flex lg:col-span-3 lg:justify-end xl:col-span-1">
               <button
                 v-if="running"
                 type="button"
-                class="btn btn-danger min-h-11 cursor-pointer"
+                class="btn btn-danger min-h-11 w-full cursor-pointer sm:w-auto xl:whitespace-nowrap"
                 @click="stopCheck"
               >
                 <Icon name="xCircle" size="sm" />
@@ -139,7 +136,7 @@
               <button
                 v-else
                 type="button"
-                class="btn btn-primary min-h-11 cursor-pointer"
+                class="btn btn-primary min-h-11 w-full cursor-pointer sm:w-auto xl:whitespace-nowrap"
                 :disabled="!canStart"
                 @click="startCheck"
               >
@@ -184,7 +181,28 @@
             :value="stats.unauthorized"
             :icon="UnauthorizedIcon"
             icon-variant="danger"
-          />
+          >
+            <template #action>
+              <HelpTooltip :content="t('admin.accounts.statusCheck.clearTooltip')">
+                <template #trigger>
+                  <button
+                    type="button"
+                    data-test="clear-unauthorized"
+                    class="status-clear-button"
+                    :disabled="!canClearCategory('unauthorized')"
+                    :aria-label="t('admin.accounts.statusCheck.clearCategory', { category: categoryLabel('unauthorized') })"
+                    @click="requestCategoryClear('unauthorized')"
+                  >
+                    <Icon
+                      :name="clearingCategory === 'unauthorized' ? 'refresh' : 'broom'"
+                      size="sm"
+                      :class="clearingCategory === 'unauthorized' ? 'animate-spin motion-reduce:animate-none' : ''"
+                    />
+                  </button>
+                </template>
+              </HelpTooltip>
+            </template>
+          </StatCard>
           <StatCard
             :title="t('admin.accounts.statusCheck.quotaExhausted')"
             :value="stats.quota_exhausted"
@@ -196,13 +214,55 @@
             :value="stats.forbidden"
             :icon="ForbiddenIcon"
             icon-variant="danger"
-          />
+          >
+            <template #action>
+              <HelpTooltip :content="t('admin.accounts.statusCheck.clearTooltip')">
+                <template #trigger>
+                  <button
+                    type="button"
+                    data-test="clear-forbidden"
+                    class="status-clear-button"
+                    :disabled="!canClearCategory('forbidden')"
+                    :aria-label="t('admin.accounts.statusCheck.clearCategory', { category: categoryLabel('forbidden') })"
+                    @click="requestCategoryClear('forbidden')"
+                  >
+                    <Icon
+                      :name="clearingCategory === 'forbidden' ? 'refresh' : 'broom'"
+                      size="sm"
+                      :class="clearingCategory === 'forbidden' ? 'animate-spin motion-reduce:animate-none' : ''"
+                    />
+                  </button>
+                </template>
+              </HelpTooltip>
+            </template>
+          </StatCard>
           <StatCard
             :title="t('admin.accounts.statusCheck.otherError')"
             :value="stats.other_error"
             :icon="OtherErrorIcon"
             icon-variant="danger"
-          />
+          >
+            <template #action>
+              <HelpTooltip :content="t('admin.accounts.statusCheck.clearTooltip')">
+                <template #trigger>
+                  <button
+                    type="button"
+                    data-test="clear-other-error"
+                    class="status-clear-button"
+                    :disabled="!canClearCategory('other_error')"
+                    :aria-label="t('admin.accounts.statusCheck.clearCategory', { category: categoryLabel('other_error') })"
+                    @click="requestCategoryClear('other_error')"
+                  >
+                    <Icon
+                      :name="clearingCategory === 'other_error' ? 'refresh' : 'broom'"
+                      size="sm"
+                      :class="clearingCategory === 'other_error' ? 'animate-spin motion-reduce:animate-none' : ''"
+                    />
+                  </button>
+                </template>
+              </HelpTooltip>
+            </template>
+          </StatCard>
         </div>
       </section>
 
@@ -246,6 +306,31 @@
           </p>
         </div>
       </section>
+
+      <ConfirmDialog
+        :show="pendingClearCategory !== null"
+        :title="clearDialogTitle"
+        :message="clearDialogMessage"
+        :confirm-text="clearConfirmText"
+        :cancel-text="t('common.cancel')"
+        :danger="true"
+        @confirm="confirmCategoryClear"
+        @cancel="pendingClearCategory = null"
+      >
+        <div v-if="pendingClearAccounts.length" class="rounded-lg border border-red-200 bg-red-50/70 p-3 dark:border-red-900/70 dark:bg-red-950/20">
+          <p class="text-xs font-medium text-red-700 dark:text-red-300">
+            {{ t('admin.accounts.statusCheck.clearAccountPreview') }}
+          </p>
+          <ul class="mt-2 max-h-36 space-y-1 overflow-y-auto text-xs text-gray-700 dark:text-gray-300">
+            <li v-for="account in pendingClearAccountPreview" :key="account.accountId" class="truncate">
+              {{ account.name }} <span class="text-gray-400">#{{ account.accountId }}</span>
+            </li>
+          </ul>
+          <p v-if="pendingClearAccounts.length > pendingClearAccountPreview.length" class="mt-2 text-xs text-gray-500 dark:text-gray-400">
+            {{ t('admin.accounts.statusCheck.clearMoreAccounts', { count: pendingClearAccounts.length - pendingClearAccountPreview.length }) }}
+          </p>
+        </div>
+      </ConfirmDialog>
     </div>
   </AppLayout>
 </template>
@@ -255,6 +340,7 @@ import { computed, defineComponent, h, nextTick, onBeforeUnmount, onMounted, ref
 import { onBeforeRouteLeave } from 'vue-router'
 import { useI18n } from 'vue-i18n'
 import AppLayout from '@/components/layout/AppLayout.vue'
+import ConfirmDialog from '@/components/common/ConfirmDialog.vue'
 import HelpTooltip from '@/components/common/HelpTooltip.vue'
 import Select, { type SelectOption } from '@/components/common/Select.vue'
 import StatCard from '@/components/common/StatCard.vue'
@@ -262,21 +348,25 @@ import { Icon } from '@/components/icons'
 import { adminAPI } from '@/api/admin'
 import type {
   AccountStatusCheckCategory,
+  AccountStatusCheckDeleteFailure,
   AccountStatusCheckEvent,
   AccountStatusCheckMode,
   AccountStatusCheckStats
 } from '@/api/admin/accounts'
 import type { Account, AdminGroup } from '@/types'
 import { useClipboard } from '@/composables/useClipboard'
+import { useAppStore } from '@/stores/app'
 
 const { t } = useI18n()
 const { copyToClipboard } = useClipboard()
+const appStore = useAppStore()
 
 const DEFAULT_MODEL = 'gpt-5.5'
 
 type RunState = 'idle' | 'running' | 'completed' | 'stopped' | 'error'
 type TerminalTone = 'muted' | 'info' | 'success' | 'warning' | 'danger'
 type StatusIconName = 'chart' | 'checkCircle' | 'key' | 'clock' | 'shield' | 'exclamationTriangle'
+type ClearableCategory = 'unauthorized' | 'forbidden' | 'other_error'
 
 interface TerminalLine {
   id: number
@@ -287,6 +377,19 @@ interface TerminalLine {
 interface ResponseBuffer {
   prefix: string
   text: string
+}
+
+interface StatusCheckAccountResult {
+  accountId: number
+  name: string
+  category: AccountStatusCheckCategory
+}
+
+interface StatusCheckRunSnapshot {
+  groupId: number
+  groupName: string
+  modelId: string
+  mode: AccountStatusCheckMode
 }
 
 const makeStatIcon = (name: StatusIconName) =>
@@ -328,10 +431,22 @@ let abortController: AbortController | null = null
 let terminalLineID = 0
 let modelLoadSequence = 0
 const responseBuffers = new Map<number, ResponseBuffer>()
+const accountResults = ref<Record<number, StatusCheckAccountResult>>({})
+const runSnapshot = ref<StatusCheckRunSnapshot | null>(null)
+const pendingClearCategory = ref<ClearableCategory | null>(null)
+const clearingCategory = ref<ClearableCategory | null>(null)
+
+const CLEAR_BATCH_SIZE = 1000
+const CLEAR_PREVIEW_LIMIT = 8
 
 const running = computed(() => runState.value === 'running')
 const canStart = computed(
-  () => selectedGroupId.value !== null && selectedModelId.value.trim() !== '' && !groupsLoading.value && !modelsLoading.value
+  () =>
+    selectedGroupId.value !== null &&
+    selectedModelId.value.trim() !== '' &&
+    !groupsLoading.value &&
+    !modelsLoading.value &&
+    clearingCategory.value === null
 )
 const progressPercent = computed(() => {
   if (stats.value.total <= 0) return 0
@@ -353,6 +468,43 @@ const modeOptions = computed<SelectOption[]>(() => [
   { value: 'default', label: t('admin.accounts.openai.testModeDefault') },
   { value: 'compact', label: t('admin.accounts.openai.testModeCompact') }
 ])
+
+const accountsByClearableCategory = computed<Record<ClearableCategory, StatusCheckAccountResult[]>>(() => {
+  const grouped: Record<ClearableCategory, StatusCheckAccountResult[]> = {
+    unauthorized: [],
+    forbidden: [],
+    other_error: []
+  }
+  for (const result of Object.values(accountResults.value)) {
+    if (result.category === 'unauthorized' || result.category === 'forbidden' || result.category === 'other_error') {
+      grouped[result.category].push(result)
+    }
+  }
+  for (const accounts of Object.values(grouped)) accounts.sort((left, right) => left.accountId - right.accountId)
+  return grouped
+})
+
+const pendingClearAccounts = computed(() =>
+  pendingClearCategory.value ? accountsByClearableCategory.value[pendingClearCategory.value] : []
+)
+const pendingClearAccountPreview = computed(() => pendingClearAccounts.value.slice(0, CLEAR_PREVIEW_LIMIT))
+const clearDialogTitle = computed(() =>
+  pendingClearCategory.value
+    ? t('admin.accounts.statusCheck.clearDialogTitle', { category: categoryLabel(pendingClearCategory.value) })
+    : ''
+)
+const clearDialogMessage = computed(() => {
+  if (!pendingClearCategory.value || !runSnapshot.value) return ''
+  return t('admin.accounts.statusCheck.clearDialogMessage', {
+    count: pendingClearAccounts.value.length,
+    category: categoryLabel(pendingClearCategory.value),
+    group: runSnapshot.value.groupName,
+    model: runSnapshot.value.modelId
+  })
+})
+const clearConfirmText = computed(() =>
+  t('admin.accounts.statusCheck.clearConfirm', { count: pendingClearAccounts.value.length })
+)
 
 const runStateLabel = computed(() => t(`admin.accounts.statusCheck.runState.${runState.value}`))
 const runStateClass = computed(() => {
@@ -502,6 +654,12 @@ function handleStatusEvent(event: AccountStatusCheckEvent) {
   mergeStats(event.stats)
   switch (event.type) {
     case 'batch_start':
+      runSnapshot.value = {
+        groupId: event.group_id ?? selectedGroupId.value ?? 0,
+        groupName: event.group_name || selectedGroupName.value,
+        modelId: event.model_id || selectedModelId.value,
+        mode: event.mode || selectedMode.value
+      }
       appendTerminal(
         t('admin.accounts.statusCheck.log.batchStart', {
           group: event.group_name || selectedGroupName.value,
@@ -530,6 +688,16 @@ function handleStatusEvent(event: AccountStatusCheckEvent) {
       break
     case 'account_result': {
       flushResponse(event)
+      if (event.account_id && event.category) {
+        accountResults.value = {
+          ...accountResults.value,
+          [event.account_id]: {
+            accountId: event.account_id,
+            name: event.account_name || t('admin.accounts.statusCheck.unknownAccount'),
+            category: event.category
+          }
+        }
+      }
       const status = event.http_status ? `HTTP ${event.http_status}` : categoryLabel(event.category)
       const latency = event.latency_ms !== undefined ? ` · ${event.latency_ms}ms` : ''
       const detail = event.error ? ` · ${event.error}` : ''
@@ -640,6 +808,9 @@ async function startCheck() {
   stats.value = emptyStats()
   terminalLines.value = []
   responseBuffers.clear()
+  accountResults.value = {}
+  runSnapshot.value = null
+  pendingClearCategory.value = null
   runState.value = 'running'
   appendTerminal(t('admin.accounts.statusCheck.log.connecting'), 'info')
 
@@ -662,6 +833,114 @@ async function startCheck() {
     appendTerminal(t('admin.accounts.statusCheck.log.requestError', { error: message }), 'danger')
   } finally {
     if (abortController === controller) abortController = null
+  }
+}
+
+function canClearCategory(category: ClearableCategory): boolean {
+  return (
+    (runState.value === 'completed' || runState.value === 'stopped') &&
+    clearingCategory.value === null &&
+    runSnapshot.value !== null &&
+    accountsByClearableCategory.value[category].length > 0
+  )
+}
+
+function requestCategoryClear(category: ClearableCategory) {
+  if (!canClearCategory(category)) return
+  pendingClearCategory.value = category
+}
+
+function errorMessage(error: unknown): string {
+  if (error instanceof Error) return error.message
+  if (error && typeof error === 'object' && 'message' in error) return String(error.message)
+  return t('admin.accounts.statusCheck.clearFailed')
+}
+
+async function confirmCategoryClear() {
+  const category = pendingClearCategory.value
+  const snapshot = runSnapshot.value
+  const accounts = [...pendingClearAccounts.value]
+  if (!category || !snapshot || accounts.length === 0 || clearingCategory.value !== null) return
+
+  pendingClearCategory.value = null
+  clearingCategory.value = category
+  appendTerminal(
+    t('admin.accounts.statusCheck.log.clearStart', {
+      category: categoryLabel(category),
+      count: accounts.length,
+      group: snapshot.groupName
+    }),
+    'warning'
+  )
+
+  const deletedIDs = new Set<number>()
+  const requestedIDs = new Set(accounts.map((account) => account.accountId))
+  const failures: AccountStatusCheckDeleteFailure[] = []
+  try {
+    for (let index = 0; index < accounts.length; index += CLEAR_BATCH_SIZE) {
+      const chunk = accounts.slice(index, index + CLEAR_BATCH_SIZE)
+      try {
+        const result = await adminAPI.accounts.deleteStatusCheckAccounts({
+          group_id: snapshot.groupId,
+          account_ids: chunk.map((account) => account.accountId)
+        })
+        for (const accountID of result.deleted_ids) {
+          if (requestedIDs.has(accountID)) deletedIDs.add(accountID)
+        }
+        failures.push(...result.failures)
+      } catch (error) {
+        const message = errorMessage(error)
+        failures.push(
+          ...chunk.map((account) => ({
+            account_id: account.accountId,
+            code: 'request_failed',
+            message
+          }))
+        )
+      }
+    }
+
+    if (deletedIDs.size > 0) {
+      const remaining = { ...accountResults.value }
+      for (const accountID of deletedIDs) delete remaining[accountID]
+      accountResults.value = remaining
+      stats.value = {
+        ...stats.value,
+        total: Math.max(0, stats.value.total - deletedIDs.size),
+        completed: Math.max(0, stats.value.completed - deletedIDs.size),
+        [category]: Math.max(0, stats.value[category] - deletedIDs.size)
+      }
+    }
+
+    for (const failure of failures) {
+      const account = accountResults.value[failure.account_id]
+      appendTerminal(
+        t('admin.accounts.statusCheck.log.clearAccountFailed', {
+          account: account?.name || `#${failure.account_id}`,
+          error: failure.message
+        }),
+        'danger'
+      )
+    }
+
+    if (deletedIDs.size === accounts.length) {
+      appStore.showSuccess(t('admin.accounts.statusCheck.clearSuccess', { count: deletedIDs.size }))
+    } else if (deletedIDs.size > 0) {
+      appStore.showWarning(
+        t('admin.accounts.statusCheck.clearPartial', { success: deletedIDs.size, failed: failures.length })
+      )
+    } else {
+      appStore.showError(t('admin.accounts.statusCheck.clearFailed'))
+    }
+    appendTerminal(
+      t('admin.accounts.statusCheck.log.clearComplete', {
+        success: deletedIDs.size,
+        failed: failures.length
+      }),
+      failures.length > 0 ? 'warning' : 'success'
+    )
+  } finally {
+    clearingCategory.value = null
   }
 }
 
@@ -698,3 +977,13 @@ onBeforeRouteLeave(() => {
   return true
 })
 </script>
+
+<style scoped>
+.status-clear-button {
+  @apply inline-flex h-8 w-8 items-center justify-center rounded-md text-gray-400;
+  @apply transition-colors duration-150 hover:bg-red-50 hover:text-red-600;
+  @apply focus:outline-none focus:ring-2 focus:ring-red-500 focus:ring-offset-2;
+  @apply disabled:cursor-not-allowed disabled:opacity-35 disabled:hover:bg-transparent disabled:hover:text-gray-400;
+  @apply dark:text-gray-500 dark:hover:bg-red-950/40 dark:hover:text-red-300 dark:focus:ring-offset-dark-800;
+}
+</style>

@@ -28,6 +28,16 @@ export default {
         quotaExhausted: '429 / 额度不足',
         forbidden: '403',
         otherError: '其他错误',
+        clearTooltip: '清除该状态账号',
+        clearCategory: '清除{category}账号',
+        clearDialogTitle: '删除{category}账号',
+        clearDialogMessage: '将永久删除分组“{group}”中本次使用 {model} 检测出的 {count} 个{category}账号。此操作无法撤销。',
+        clearAccountPreview: '即将删除的账号',
+        clearMoreAccounts: '以及另外 {count} 个账号',
+        clearConfirm: '永久删除 {count} 个账号',
+        clearSuccess: '已删除 {count} 个账号',
+        clearPartial: '部分删除完成：成功 {success} 个，失败 {failed} 个',
+        clearFailed: '删除账号失败',
         terminalTitle: '检测终端',
         terminalEmpty: '选择分组并开始检测后，实时日志会显示在这里。',
         copyLogs: '复制日志',
@@ -58,7 +68,10 @@ export default {
           batchStopped: '检测任务已取消。',
           stopRequested: '已请求停止，正在取消未完成账号...',
           requestError: '检测请求失败：{error}',
-          response: '测试返回'
+          response: '测试返回',
+          clearStart: '开始清除{category}账号：分组“{group}”，共 {count} 个',
+          clearAccountFailed: '账号 {account} 删除失败：{error}',
+          clearComplete: '清除完成：成功 {success} 个，失败 {failed} 个'
         }
       },
       createAccount: '添加账号',
@@ -184,7 +197,7 @@ export default {
         ungrouped: '未分组',
         hint: '显示格式为“分组名 / 基础分 / 粘性加分”。基础分按当前筛选条件限定的候选账号计算，包含优先级、负载、排队、错误率、首包延迟、重置窗口、额度余量、计费倍率等因子；粘性加分只在开启粘性加权时用于 previous_response_id 或 session_hash。分数越大越优先。'
       },
-      usageWindowsHint: '“5h / 7d”是上游账号（如 OpenAI ChatGPT、Claude）官方的滚动用量窗口限制，由上游对账号设定，并非 sub2api 配置，也与你映射的模型无关。窗口滚动到期后用量会自动重置，无法在 sub2api 端解除该限制。',
+      usageWindowsHint: '“5h / 7d / 30d”是上游账号的真实滚动用量窗口。美元金额仅估算该周期内经过当前 Sub2API 的请求成本，不包含账号在其他客户端产生的消耗。',
       ollamaCloud: {
         title: 'Ollama Cloud 用量',
         sessionSecurityHint: '浏览器会话会加密落库，且只发送到固定的 Ollama 官方设置页。',
@@ -467,7 +480,9 @@ export default {
         grokLastProbe: '探测 {time}',
         grokLastHeadersSeen: '响应头 {time}',
         passiveSampled: '被动采样',
-        activeQuery: '查询'
+        activeQuery: '查询',
+        localCostHint: '当前 Sub2API 记录的账号估算消耗',
+        localCostUnavailable: '上游已有用量，但当前 Sub2API 没有对应日志，无法计算金额'
       },
       openaiQuotaReset: {
         count: '次数',

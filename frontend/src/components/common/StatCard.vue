@@ -1,9 +1,9 @@
 <template>
-  <div class="stat-card">
+  <div class="stat-card relative">
     <div :class="['stat-icon', iconClass]">
       <component v-if="icon" :is="icon" class="h-6 w-6" aria-hidden="true" />
     </div>
-    <div class="min-w-0 flex-1">
+    <div class="min-w-0 flex-1" :class="$slots.action ? 'pr-8' : ''">
       <p class="stat-label truncate">{{ title }}</p>
       <div class="mt-1 flex items-baseline gap-2">
         <p class="stat-value" :title="String(formattedValue)">{{ formattedValue }}</p>
@@ -17,6 +17,9 @@
           {{ formattedChange }}
         </span>
       </div>
+    </div>
+    <div v-if="$slots.action" class="absolute bottom-3 right-3">
+      <slot name="action"></slot>
     </div>
   </div>
 </template>

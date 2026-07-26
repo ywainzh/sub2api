@@ -230,8 +230,9 @@ func TestBuildCodexUsageProgressFromExtra_ZerosExpiredWindow(t *testing.T) {
 	t.Run("active 5h window keeps utilization", func(t *testing.T) {
 		resetAt := now.Add(2 * time.Hour).Format(time.RFC3339)
 		extra := map[string]any{
-			"codex_5h_used_percent": 42.0,
-			"codex_5h_reset_at":     resetAt,
+			"codex_5h_used_percent":   42.0,
+			"codex_5h_reset_at":       resetAt,
+			"codex_5h_window_minutes": 300,
 		}
 		progress := buildCodexUsageProgressFromExtra(extra, "5h", now)
 		if progress == nil {
@@ -239,6 +240,9 @@ func TestBuildCodexUsageProgressFromExtra_ZerosExpiredWindow(t *testing.T) {
 		}
 		if progress.Utilization != 42.0 {
 			t.Fatalf("expected Utilization=42, got %v", progress.Utilization)
+		}
+		if progress.WindowMinutes != 300 {
+			t.Fatalf("expected WindowMinutes=300, got %d", progress.WindowMinutes)
 		}
 	})
 
@@ -253,6 +257,51 @@ func TestBuildCodexUsageProgressFromExtra_ZerosExpiredWindow(t *testing.T) {
 		}
 		if progress.Utilization != 0 {
 			t.Fatalf("expected Utilization=0 for expired 7d window, got %v", progress.Utilization)
+		}
+	})
+}
+
+func TestCodexWindowStatsStartUsesReportedWindowLength(t *testing.T) {
+	t.Parallel()
+	now := time.Date(2026, 7, 26, 12, 0, 0, 0, time.UTC)
+	resetAt := now.Add(26*24*time.Hour + 17*time.Hour)
+
+	t.Run("30 day window", func(t *testing.T) {
+		progress := &UsageProgress{WindowMinutes: 30 * 24 * 60, ResetsAt: &resetAt}
+		got := codexWindowStatsStart(progress, 7*24*time.Hour, now)
+		want := resetAt.Add(-30 * 24 * time.Hour)
+		if !got.Equal(want) {
+			t.Fatalf("codexWindowStatsStart() = %v, want %v", got, want)
+		}
+		if !got.Before(now) {
+			t.Fatalf("30 day window start must be in the past, got %v", got)
+		}
+	})
+
+	t.Run("missing window length falls back", func(t *testing.T) {
+		progress := &UsageProgress{ResetsAt: &resetAt}
+		got := codexWindowStatsStart(progress, 7*24*time.Hour, now)
+		want := resetAt.Add(-7 * 24 * time.Hour)
+		if !got.Equal(want) {
+			t.Fatalf("codexWindowStatsStart() = %v, want %v", got, want)
+		}
+	})
+
+	t.Run("invalid window length falls back", func(t *testing.T) {
+		progress := &UsageProgress{WindowMinutes: 2 * 366 * 24 * 60, ResetsAt: &resetAt}
+		got := codexWindowStatsStart(progress, 5*time.Hour, now)
+		want := resetAt.Add(-5 * time.Hour)
+		if !got.Equal(want) {
+			t.Fatalf("codexWindowStatsStart() = %v, want %v", got, want)
+		}
+	})
+
+	t.Run("expired window starts a fresh cycle", func(t *testing.T) {
+		expiredResetAt := now.Add(-time.Minute)
+		progress := &UsageProgress{WindowMinutes: 30 * 24 * 60, ResetsAt: &expiredResetAt}
+		got := codexWindowStatsStart(progress, 7*24*time.Hour, now)
+		if !got.Equal(now) {
+			t.Fatalf("codexWindowStatsStart() = %v, want %v", got, now)
 		}
 	})
 }

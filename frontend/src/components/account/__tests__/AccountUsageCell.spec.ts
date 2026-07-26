@@ -209,6 +209,7 @@ describe('AccountUsageCell', () => {
         utilization: 77,
         resets_at: '2026-03-13T12:00:00Z',
         remaining_seconds: 3600,
+        window_minutes: 43200,
         window_stats: {
           requests: 3,
           tokens: 300,
@@ -249,7 +250,7 @@ describe('AccountUsageCell', () => {
 
     expect(getUsage).toHaveBeenCalledWith(2000)
     expect(wrapper.text()).toContain('5h|15|300')
-    expect(wrapper.text()).toContain('7d|77|300')
+    expect(wrapper.text()).toContain('30d|77|300')
   })
 
   it('OpenAI OAuth 有 codex 快照时仍然使用 /usage API 数据渲染', async () => {
@@ -571,7 +572,7 @@ describe('AccountUsageCell', () => {
   expect(wrapper.text()).toContain('7d|100|106540000')
   })
 
-  it('Key 账号会展示 today stats 徽章并带 A/U 提示', async () => {
+  it('Key 账号会展示精简的 today stats 徽章', async () => {
 		const wrapper = mount(AccountUsageCell, {
 		  props: {
 		    account: makeAccount({
@@ -599,15 +600,16 @@ describe('AccountUsageCell', () => {
 
 		expect(wrapper.text()).toContain('1.0M req')
 		expect(wrapper.text()).toContain('1.0B')
-		expect(wrapper.text()).toContain('A $12.35')
-		expect(wrapper.text()).toContain('U $6.79')
+    expect(wrapper.text()).toContain('$12.35')
+    expect(wrapper.text()).not.toContain('A $')
+    expect(wrapper.text()).not.toContain('U $')
 
 		const badges = wrapper.findAll('span[title]')
-		expect(badges.some(node => node.attributes('title') === 'usage.accountBilled')).toBe(true)
-		expect(badges.some(node => node.attributes('title') === 'usage.userBilled')).toBe(true)
+		expect(badges.some(node => node.attributes('title') === 'admin.accounts.usageWindow.localCostHint')).toBe(true)
+		expect(badges.some(node => node.attributes('title') === 'usage.userBilled')).toBe(false)
   })
 
-  it('Grok OAuth 会展示本地 user billed 用量并把耗尽配额显示为 0% 剩余', async () => {
+  it('Grok OAuth 会展示精简的本地成本并把耗尽配额显示为 0% 剩余', async () => {
     getUsage.mockResolvedValue({
       grok_local_usage: {
         requests: 4,
@@ -650,13 +652,14 @@ describe('AccountUsageCell', () => {
     expect(getUsage).toHaveBeenCalledWith(3861)
     expect(wrapper.text()).toContain('4 req')
     expect(wrapper.text()).toContain('1.2K')
-    expect(wrapper.text()).toContain('A $0.12')
-    expect(wrapper.text()).toContain('U $0.34')
+    expect(wrapper.text()).toContain('$0.12')
+    expect(wrapper.text()).not.toContain('A $')
+    expect(wrapper.text()).not.toContain('U $')
     expect(wrapper.text()).toContain('admin.accounts.usageWindow.grokRequests|0|2026-07-09T16:00:00Z')
 
     const badges = wrapper.findAll('span[title]')
-    expect(badges.some(node => node.attributes('title') === 'usage.accountBilled')).toBe(true)
-    expect(badges.some(node => node.attributes('title') === 'usage.userBilled')).toBe(true)
+    expect(badges.some(node => node.attributes('title') === 'admin.accounts.usageWindow.localCostHint')).toBe(true)
+    expect(badges.some(node => node.attributes('title') === 'usage.userBilled')).toBe(false)
   })
 
   it('Grok OAuth 配额条按剩余容量显示 100% 满格和 25% 低量', async () => {
@@ -1335,8 +1338,9 @@ describe('AccountUsageCell', () => {
 
 		expect(wrapper.text()).toContain('0 req')
 		expect(wrapper.text()).toContain('0')
-		expect(wrapper.text()).toContain('A $0.00')
-		expect(wrapper.text()).toContain('U $0.00')
+    expect(wrapper.text()).toContain('$0.00')
+    expect(wrapper.text()).not.toContain('A $')
+    expect(wrapper.text()).not.toContain('U $')
   })
 
   it('Anthropic OAuth 会渲染 7d F (Fable) 进度条，且 7d S 逻辑保留', async () => {

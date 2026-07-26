@@ -5,7 +5,11 @@ const api = vi.hoisted(() => ({
   getAllIncludingInactive: vi.fn(),
   getModelsListCandidates: vi.fn(),
   list: vi.fn(),
-  runStatusCheck: vi.fn()
+  runStatusCheck: vi.fn(),
+  deleteStatusCheckAccounts: vi.fn(),
+  showSuccess: vi.fn(),
+  showWarning: vi.fn(),
+  showError: vi.fn()
 }))
 
 vi.mock('@/api/admin', () => ({
@@ -16,13 +20,22 @@ vi.mock('@/api/admin', () => ({
     },
     accounts: {
       list: api.list,
-      runStatusCheck: api.runStatusCheck
+      runStatusCheck: api.runStatusCheck,
+      deleteStatusCheckAccounts: api.deleteStatusCheckAccounts
     }
   }
 }))
 
 vi.mock('@/composables/useClipboard', () => ({
   useClipboard: () => ({ copyToClipboard: vi.fn().mockResolvedValue(undefined) })
+}))
+
+vi.mock('@/stores/app', () => ({
+  useAppStore: () => ({
+    showSuccess: api.showSuccess,
+    showWarning: api.showWarning,
+    showError: api.showError
+  })
 }))
 
 vi.mock('vue-router', () => ({
@@ -51,6 +64,12 @@ function mountView() {
     global: {
       stubs: {
         AppLayout: { template: '<main><slot /></main>' },
+        ConfirmDialog: {
+          props: ['show', 'title', 'message', 'confirmText'],
+          emits: ['confirm', 'cancel'],
+          template:
+            '<div v-if="show" data-test="clear-dialog"><h2>{{ title }}</h2><p>{{ message }}</p><slot /><button data-test="confirm-clear" @click="$emit(\'confirm\')">{{ confirmText }}</button></div>'
+        },
         Icon: true
       }
     }
@@ -80,6 +99,16 @@ describe('AccountStatusCheckView', () => {
       total_pages: 1
     })
     api.runStatusCheck.mockReset().mockResolvedValue(undefined)
+    api.deleteStatusCheckAccounts.mockReset().mockResolvedValue({
+      requested: 0,
+      deleted: 0,
+      deleted_ids: [],
+      failed: 0,
+      failures: []
+    })
+    api.showSuccess.mockReset()
+    api.showWarning.mockReset()
+    api.showError.mockReset()
   })
 
   it('defaults to gpt-5.5 and the regular test mode while loading OpenAI groups', async () => {
@@ -164,5 +193,113 @@ describe('AccountStatusCheckView', () => {
     expect(terminal).toMatch(/\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2} INFO/)
     expect(terminal).toContain('admin.accounts.statusCheck.log.response')
     expect(terminal).toContain('Hello world!')
+  })
+
+  it('offers cleanup only for 401, 403, and other errors after a completed check', async () => {
+    api.runStatusCheck.mockImplementation(async (_request, onEvent) => {
+      onEvent({
+        type: 'batch_start',
+        group_id: 2,
+        group_name: 'OpenAI disabled',
+        model_id: 'gpt-5.5',
+        mode: 'default',
+        total: 4,
+        stats: { total: 4, completed: 0, normal: 0, unauthorized: 0, quota_exhausted: 0, forbidden: 0, other_error: 0 }
+      })
+      const results = [
+        { account_id: 11, account_name: 'unauthorized', category: 'unauthorized', http_status: 401 },
+        { account_id: 12, account_name: 'quota', category: 'quota_exhausted', http_status: 429 },
+        { account_id: 13, account_name: 'forbidden', category: 'forbidden', http_status: 403 },
+        { account_id: 14, account_name: 'network', category: 'other_error' }
+      ] as const
+      results.forEach((result, index) => {
+        onEvent({
+          type: 'account_result',
+          ...result,
+          stats: {
+            total: 4,
+            completed: index + 1,
+            normal: 0,
+            unauthorized: index >= 0 ? 1 : 0,
+            quota_exhausted: index >= 1 ? 1 : 0,
+            forbidden: index >= 2 ? 1 : 0,
+            other_error: index >= 3 ? 1 : 0
+          }
+        })
+      })
+      onEvent({
+        type: 'batch_complete',
+        group_id: 2,
+        completed: 4,
+        total: 4,
+        stats: { total: 4, completed: 4, normal: 0, unauthorized: 1, quota_exhausted: 1, forbidden: 1, other_error: 1 }
+      })
+    })
+
+    const wrapper = mountView()
+    await flushPromises()
+    expect(wrapper.get('[data-test="clear-unauthorized"]').attributes()).toHaveProperty('disabled')
+
+    await wrapper.get('.btn-primary').trigger('click')
+    await flushPromises()
+
+    expect(wrapper.findAll('[data-test^="clear-"]')).toHaveLength(3)
+    expect(wrapper.find('[data-test="clear-quota-exhausted"]').exists()).toBe(false)
+    expect(wrapper.get('[data-test="clear-unauthorized"]').attributes()).not.toHaveProperty('disabled')
+    expect(wrapper.get('[data-test="clear-forbidden"]').attributes()).not.toHaveProperty('disabled')
+    expect(wrapper.get('[data-test="clear-other-error"]').attributes()).not.toHaveProperty('disabled')
+  })
+
+  it('confirms permanent deletion and keeps failed accounts in the current result', async () => {
+    api.runStatusCheck.mockImplementation(async (_request, onEvent) => {
+      onEvent({
+        type: 'batch_start',
+        group_id: 2,
+        group_name: 'OpenAI disabled',
+        model_id: 'gpt-5.5',
+        mode: 'default',
+        total: 2,
+        stats: { total: 2, completed: 0, normal: 0, unauthorized: 0, quota_exhausted: 0, forbidden: 0, other_error: 0 }
+      })
+      onEvent({ type: 'account_result', account_id: 21, account_name: 'expired-21', category: 'unauthorized' })
+      onEvent({ type: 'account_result', account_id: 22, account_name: 'expired-22', category: 'unauthorized' })
+      onEvent({
+        type: 'batch_complete',
+        group_id: 2,
+        completed: 2,
+        total: 2,
+        stats: { total: 2, completed: 2, normal: 0, unauthorized: 2, quota_exhausted: 0, forbidden: 0, other_error: 0 }
+      })
+    })
+    api.deleteStatusCheckAccounts.mockResolvedValue({
+      requested: 2,
+      deleted: 1,
+      deleted_ids: [21],
+      failed: 1,
+      failures: [{ account_id: 22, code: 'delete_failed', message: 'database busy' }]
+    })
+
+    const wrapper = mountView()
+    await flushPromises()
+    await wrapper.get('.btn-primary').trigger('click')
+    await flushPromises()
+    await wrapper.get('[data-test="clear-unauthorized"]').trigger('click')
+
+    expect(wrapper.get('[data-test="clear-dialog"]').text()).toContain('expired-21')
+    expect(wrapper.get('[data-test="clear-dialog"]').text()).toContain('expired-22')
+    expect(wrapper.get('[data-test="clear-dialog"]').text()).toContain('gpt-5.5')
+
+    await wrapper.get('[data-test="confirm-clear"]').trigger('click')
+    await flushPromises()
+
+    expect(api.deleteStatusCheckAccounts).toHaveBeenCalledWith({ group_id: 2, account_ids: [21, 22] })
+    expect(api.showWarning).toHaveBeenCalled()
+    const view = wrapper.vm as unknown as {
+      stats: { total: number; completed: number; unauthorized: number }
+      accountsByClearableCategory: { unauthorized: Array<{ accountId: number }> }
+    }
+    expect(view.stats).toMatchObject({ total: 1, completed: 1, unauthorized: 1 })
+    expect(view.accountsByClearableCategory.unauthorized.map((account) => account.accountId)).toEqual([22])
+    expect(wrapper.get('[role="log"]').text()).toContain('database busy')
   })
 })

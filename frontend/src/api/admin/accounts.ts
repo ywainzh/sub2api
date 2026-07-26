@@ -81,6 +81,25 @@ export interface AccountStatusCheckEvent {
   stats?: AccountStatusCheckStats
 }
 
+export interface AccountStatusCheckDeleteRequest {
+  group_id: number
+  account_ids: number[]
+}
+
+export interface AccountStatusCheckDeleteFailure {
+  account_id: number
+  code: string
+  message: string
+}
+
+export interface AccountStatusCheckDeleteResponse {
+  requested: number
+  deleted: number
+  deleted_ids: number[]
+  failed: number
+  failures: AccountStatusCheckDeleteFailure[]
+}
+
 export async function runStatusCheck(
   request: AccountStatusCheckRequest,
   onEvent: (event: AccountStatusCheckEvent) => void,
@@ -153,6 +172,17 @@ export async function runStatusCheck(
 
   buffer += decoder.decode()
   if (buffer.trim()) processBlock(buffer)
+}
+
+export async function deleteStatusCheckAccounts(
+  request: AccountStatusCheckDeleteRequest
+): Promise<AccountStatusCheckDeleteResponse> {
+  const { data } = await apiClient.post<AccountStatusCheckDeleteResponse>(
+    '/admin/accounts/status-check/delete-accounts',
+    request,
+    { timeout: 120000 }
+  )
+  return data
 }
 
 /**
@@ -1058,6 +1088,7 @@ export async function refreshOllamaCloudUsage(id: number): Promise<OllamaCloudUs
 
 export const accountsAPI = {
   runStatusCheck,
+  deleteStatusCheckAccounts,
   list,
   listWithEtag,
   getById,

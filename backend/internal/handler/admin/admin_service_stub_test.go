@@ -35,6 +35,12 @@ type stubAdminService struct {
 	bulkUpdateAccountErr                error
 	lastBulkUpdateAccountInput          *service.BulkUpdateAccountsInput
 	getAccountResult                    *service.Account
+	getGroupResult                      *service.Group
+	getGroupErr                         error
+	getAccountsByIDsResult              []*service.Account
+	getAccountsByIDsErr                 error
+	deleteAccountErrors                 map[int64]error
+	deletedAccountIDs                   []int64
 	updateAccountCalls                  int
 	updateAccountExtraCalls             int
 	checkMixedErr                       error
@@ -282,6 +288,12 @@ func (s *stubAdminService) GetAllGroupsIncludingInactive(ctx context.Context) ([
 }
 
 func (s *stubAdminService) GetGroup(ctx context.Context, id int64) (*service.Group, error) {
+	if s.getGroupErr != nil {
+		return nil, s.getGroupErr
+	}
+	if s.getGroupResult != nil {
+		return s.getGroupResult, nil
+	}
 	group := service.Group{ID: id, Name: "group", Status: service.StatusActive}
 	return &group, nil
 }
@@ -471,6 +483,12 @@ func (s *stubAdminService) GetAccount(ctx context.Context, id int64) (*service.A
 }
 
 func (s *stubAdminService) GetAccountsByIDs(ctx context.Context, ids []int64) ([]*service.Account, error) {
+	if s.getAccountsByIDsErr != nil {
+		return nil, s.getAccountsByIDsErr
+	}
+	if s.getAccountsByIDsResult != nil {
+		return s.getAccountsByIDsResult, nil
+	}
 	out := make([]*service.Account, 0, len(ids))
 	for _, id := range ids {
 		account := service.Account{ID: id, Name: "account", Status: service.StatusActive}
@@ -514,6 +532,13 @@ func (s *stubAdminService) UpdateAccountExtra(ctx context.Context, id int64, upd
 }
 
 func (s *stubAdminService) DeleteAccount(ctx context.Context, id int64) error {
+	s.mu.Lock()
+	s.deletedAccountIDs = append(s.deletedAccountIDs, id)
+	err := s.deleteAccountErrors[id]
+	s.mu.Unlock()
+	if err != nil {
+		return err
+	}
 	return nil
 }
 

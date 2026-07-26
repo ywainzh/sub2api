@@ -28,6 +28,16 @@ export default {
         quotaExhausted: '429 / Quota exhausted',
         forbidden: '403',
         otherError: 'Other errors',
+        clearTooltip: 'Delete accounts in this status',
+        clearCategory: 'Delete {category} accounts',
+        clearDialogTitle: 'Delete {category} accounts',
+        clearDialogMessage: 'Permanently delete {count} {category} account(s) found in group "{group}" using {model}. This cannot be undone.',
+        clearAccountPreview: 'Accounts to be deleted',
+        clearMoreAccounts: 'And {count} more account(s)',
+        clearConfirm: 'Permanently delete {count}',
+        clearSuccess: 'Deleted {count} account(s)',
+        clearPartial: 'Partially deleted: {success} succeeded, {failed} failed',
+        clearFailed: 'Failed to delete accounts',
         terminalTitle: 'Check terminal',
         terminalEmpty: 'Select a group and start a check to see live logs here.',
         copyLogs: 'Copy logs',
@@ -58,7 +68,10 @@ export default {
           batchStopped: 'The check was canceled.',
           stopRequested: 'Stop requested. Canceling unfinished accounts...',
           requestError: 'Status check failed: {error}',
-          response: 'Test response'
+          response: 'Test response',
+          clearStart: 'Deleting {category} accounts from group "{group}": {count} total',
+          clearAccountFailed: 'Failed to delete account {account}: {error}',
+          clearComplete: 'Delete completed: {success} succeeded, {failed} failed'
         }
       },
       createAccount: 'Create Account',
@@ -231,7 +244,7 @@ export default {
         ungrouped: 'Ungrouped',
         hint: 'Displayed as "group / base score / sticky bonus". The base score is computed within the current filtered candidate set and includes priority, load, queue depth, error rate, first-token latency, reset window, quota headroom, billing rate, and related factors. The sticky bonus applies only when sticky weighting is enabled for previous_response_id or session_hash. Higher scores are preferred.'
       },
-      usageWindowsHint: '"5h / 7d" are the upstream account\'s official rolling usage windows (e.g. OpenAI ChatGPT, Claude). They are imposed by the upstream provider on the account itself — not configured by sub2api, and unrelated to the models you map. Usage resets automatically once each window rolls over, and the limit cannot be lifted from within sub2api.',
+      usageWindowsHint: '"5h / 7d / 30d" are the upstream account\'s actual rolling usage windows. The dollar amount estimates only requests routed through this Sub2API instance during the window and excludes usage from other clients.',
       ollamaCloud: {
         title: 'Ollama Cloud usage',
         sessionSecurityHint: 'The browser session is encrypted at rest and sent only to the fixed official settings URL.',
@@ -1401,7 +1414,9 @@ export default {
         grokLastProbe: 'Probe {time}',
         grokLastHeadersSeen: 'Headers {time}',
         passiveSampled: 'Passive',
-        activeQuery: 'Query'
+        activeQuery: 'Query',
+        localCostHint: 'Estimated account usage recorded by this Sub2API instance',
+        localCostUnavailable: 'Upstream usage exists, but this Sub2API instance has no matching logs to calculate the amount'
       },
       openaiQuotaReset: {
         count: 'Credits',

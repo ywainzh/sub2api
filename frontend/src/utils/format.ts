@@ -302,6 +302,24 @@ export function formatCompactNumber(
 }
 
 /**
+ * Format compact USD usage while preserving meaningful values below one cent.
+ */
+export function formatUsageCost(amount: number | null | undefined): string {
+  if (amount === null || amount === undefined || !Number.isFinite(amount) || amount <= 0) {
+    return '$0.00'
+  }
+  if (amount < 0.0001) return '<$0.0001'
+  if (amount >= 1) return `$${amount.toFixed(2)}`
+
+  let value = amount.toFixed(4).replace(/0+$/, '').replace(/\.$/, '')
+  const decimalIndex = value.indexOf('.')
+  if (decimalIndex < 0) return `$${value}.00`
+  const fractionLength = value.length - decimalIndex - 1
+  if (fractionLength < 2) value = value.padEnd(value.length + 2 - fractionLength, '0')
+  return `$${value}`
+}
+
+/**
  * 格式化倒计时（从现在到目标时间的剩余时间）
  * @param targetDate 目标日期字符串或 Date 对象
  * @returns 倒计时字符串，如 "2h 41m", "3d 5h", "15m"

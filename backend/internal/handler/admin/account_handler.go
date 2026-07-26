@@ -1189,6 +1189,157 @@ func (h *AccountHandler) StatusCheck(c *gin.Context) {
 	}
 }
 
+const accountStatusCheckDeleteBatchLimit = 1000
+
+type accountStatusCheckDeleteRequest struct {
+	GroupID    int64   `json:"group_id"`
+	AccountIDs []int64 `json:"account_ids"`
+}
+
+type accountStatusCheckDeleteFailure struct {
+	AccountID int64  `json:"account_id"`
+	Code      string `json:"code"`
+	Message   string `json:"message"`
+}
+
+func accountBelongsToGroup(account *service.Account, groupID int64) bool {
+	if account == nil {
+		return false
+	}
+	for _, candidate := range account.GroupIDs {
+		if candidate == groupID {
+			return true
+		}
+	}
+	for _, binding := range account.AccountGroups {
+		if binding.GroupID == groupID {
+			return true
+		}
+	}
+	return false
+}
+
+// DeleteStatusCheckAccounts permanently deletes accounts selected from one
+// completed status-check result. Group membership is revalidated to keep stale
+// browser results from deleting accounts that have since moved elsewhere.
+// POST /api/v1/admin/accounts/status-check/delete-accounts
+func (h *AccountHandler) DeleteStatusCheckAccounts(c *gin.Context) {
+	var req accountStatusCheckDeleteRequest
+	if err := c.ShouldBindJSON(&req); err != nil {
+		response.BadRequest(c, "Invalid request body")
+		return
+	}
+	if req.GroupID <= 0 {
+		response.BadRequest(c, "group_id must be greater than zero")
+		return
+	}
+	if len(req.AccountIDs) == 0 {
+		response.BadRequest(c, "account_ids is required")
+		return
+	}
+	if len(req.AccountIDs) > accountStatusCheckDeleteBatchLimit {
+		response.BadRequest(c, fmt.Sprintf("account_ids cannot contain more than %d items", accountStatusCheckDeleteBatchLimit))
+		return
+	}
+
+	uniqueIDs := make([]int64, 0, len(req.AccountIDs))
+	seen := make(map[int64]struct{}, len(req.AccountIDs))
+	for _, accountID := range req.AccountIDs {
+		if accountID <= 0 {
+			response.BadRequest(c, "account_ids must contain positive integers")
+			return
+		}
+		if _, exists := seen[accountID]; exists {
+			continue
+		}
+		seen[accountID] = struct{}{}
+		uniqueIDs = append(uniqueIDs, accountID)
+	}
+
+	ctx := c.Request.Context()
+	group, err := h.adminService.GetGroup(ctx, req.GroupID)
+	if err != nil {
+		response.ErrorFrom(c, err)
+		return
+	}
+	if group == nil {
+		response.ErrorFrom(c, service.ErrGroupNotFound)
+		return
+	}
+	if group.Platform != service.PlatformOpenAI {
+		response.BadRequest(c, "status check cleanup only supports OpenAI groups")
+		return
+	}
+
+	accounts, err := h.adminService.GetAccountsByIDs(ctx, uniqueIDs)
+	if err != nil {
+		response.ErrorFrom(c, err)
+		return
+	}
+	found := make(map[int64]*service.Account, len(accounts))
+	for _, account := range accounts {
+		if account != nil {
+			found[account.ID] = account
+		}
+	}
+
+	candidates := make([]*service.Account, 0, len(accounts))
+	failures := make([]accountStatusCheckDeleteFailure, 0)
+	for _, accountID := range uniqueIDs {
+		account := found[accountID]
+		switch {
+		case account == nil:
+			failures = append(failures, accountStatusCheckDeleteFailure{
+				AccountID: accountID,
+				Code:      "account_not_found",
+				Message:   "account not found",
+			})
+		case !accountBelongsToGroup(account, req.GroupID):
+			failures = append(failures, accountStatusCheckDeleteFailure{
+				AccountID: accountID,
+				Code:      "account_group_changed",
+				Message:   "account no longer belongs to the checked group",
+			})
+		default:
+			candidates = append(candidates, account)
+		}
+	}
+
+	// Delete linked shadows before parents. DeleteAccount cascades remaining
+	// shadows, so this order prevents a selected shadow from becoming a false
+	// not-found failure after its parent is removed.
+	sort.SliceStable(candidates, func(i, j int) bool {
+		leftShadow := candidates[i].ParentAccountID != nil
+		rightShadow := candidates[j].ParentAccountID != nil
+		if leftShadow != rightShadow {
+			return leftShadow
+		}
+		return candidates[i].ID < candidates[j].ID
+	})
+
+	deletedIDs := make([]int64, 0, len(candidates))
+	for _, account := range candidates {
+		if err := h.adminService.DeleteAccount(ctx, account.ID); err != nil {
+			failures = append(failures, accountStatusCheckDeleteFailure{
+				AccountID: account.ID,
+				Code:      "delete_failed",
+				Message:   err.Error(),
+			})
+			continue
+		}
+		deletedIDs = append(deletedIDs, account.ID)
+	}
+	sort.Slice(deletedIDs, func(i, j int) bool { return deletedIDs[i] < deletedIDs[j] })
+
+	response.Success(c, gin.H{
+		"requested":   len(uniqueIDs),
+		"deleted":     len(deletedIDs),
+		"deleted_ids": deletedIDs,
+		"failed":      len(failures),
+		"failures":    failures,
+	})
+}
+
 // RecoverState handles unified recovery of recoverable account runtime state.
 // POST /api/v1/admin/accounts/:id/recover-state
 func (h *AccountHandler) RecoverState(c *gin.Context) {

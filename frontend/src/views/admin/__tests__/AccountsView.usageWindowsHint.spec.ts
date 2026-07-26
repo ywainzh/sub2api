@@ -71,9 +71,6 @@ const DataTableStub = {
         <div v-if="column.key === 'usage'" data-test="usage-header">
           <slot :name="'header-' + column.key" :column="column" />
         </div>
-        <div v-if="column.key === 'upstream_billing_rate'" data-test="upstream-billing-header">
-          <slot :name="'header-' + column.key" :column="column" />
-        </div>
       </template>
     </div>
   `
@@ -176,17 +173,13 @@ describe('admin AccountsView usage windows hint', () => {
     expect(columns.some(column => column.key === 'ollama_cloud_usage')).toBe(false)
   })
 
-  it('renders the upstream billing trust warning next to the declared-rate column', async () => {
+  it('removes the declared-rate column and clears its legacy sort preference', async () => {
+    localStorage.setItem('account-table-sort', JSON.stringify({ key: 'upstream_billing_rate', order: 'asc' }))
     const wrapper = mountView()
     await flushPromises()
 
-    const header = wrapper.find('[data-test="upstream-billing-header"]')
-    expect(header.exists()).toBe(true)
-    expect(header.text()).toContain('admin.accounts.columns.upstreamBillingRate')
-    expect(wrapper.findAll('[data-test="usage-windows-hint"]').some(node =>
-      node.text() === 'admin.accounts.upstreamBilling.trustWarning'
-    )).toBe(true)
     const columns = wrapper.getComponent(DataTableStub).props('columns') as Array<{ key: string; sortable: boolean }>
-    expect(columns.find(column => column.key === 'upstream_billing_rate')?.sortable).toBe(true)
+    expect(columns.some(column => column.key === 'upstream_billing_rate')).toBe(false)
+    expect(localStorage.getItem('account-table-sort')).toBeNull()
   })
 })

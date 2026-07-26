@@ -146,4 +146,56 @@ describe('UsageProgressBar', () => {
     expect(wrapper.get('.h-1\\.5 > div').attributes('style')).toContain('width: 100%')
     expect(wrapper.get('.h-1\\.5 > div').classes()).toContain('bg-red-500')
   })
+
+  it('100% 时继续显示本周期的紧凑美元消耗', () => {
+    const wrapper = mount(UsageProgressBar, {
+      props: {
+        label: '30d',
+        utilization: 100,
+        color: 'emerald',
+        windowStats: {
+          requests: 26,
+          tokens: 16400,
+          cost: 0.0037
+        }
+      }
+    })
+
+    expect(wrapper.text()).toContain('26 req')
+    expect(wrapper.text()).toContain('16.4K')
+    expect(wrapper.text()).toContain('$0.0037')
+    expect(wrapper.text()).not.toContain('A $')
+    expect(wrapper.text()).not.toContain('U $')
+  })
+
+  it('上游有用量但本地无日志时显示未知而不是零成本', () => {
+    const wrapper = mount(UsageProgressBar, {
+      props: {
+        label: '30d',
+        utilization: 100,
+        color: 'emerald',
+        windowStats: {
+          requests: 0,
+          tokens: 0,
+          cost: 0
+        }
+      }
+    })
+
+    expect(wrapper.text()).toContain('--')
+    expect(wrapper.text()).not.toContain('$0.00')
+  })
+
+  it('上游有用量但未返回本地统计对象时也显示未知', () => {
+    const wrapper = mount(UsageProgressBar, {
+      props: {
+        label: '30d',
+        utilization: 64,
+        color: 'emerald'
+      }
+    })
+
+    expect(wrapper.text()).toContain('--')
+    expect(wrapper.text()).not.toContain('$0.00')
+  })
 })

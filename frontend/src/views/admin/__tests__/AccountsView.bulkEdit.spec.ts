@@ -246,7 +246,7 @@ describe('admin AccountsView bulk edit scope', () => {
     })
   })
 
-  it('passes the loaded global probe state to every upstream billing cell', async () => {
+  it('does not load or render the removed upstream billing column', async () => {
     listAccounts.mockResolvedValue({
       items: [
         {
@@ -311,8 +311,8 @@ describe('admin AccountsView bulk edit scope', () => {
 
     await flushPromises()
 
-    expect(getUpstreamBillingProbeSettings).toHaveBeenCalledTimes(1)
-    expect(wrapper.get('[data-test="upstream-billing-cell"]').attributes('data-global-enabled')).toBe('false')
+    expect(getUpstreamBillingProbeSettings).not.toHaveBeenCalled()
+    expect(wrapper.find('[data-test="upstream-billing-cell"]').exists()).toBe(false)
   })
 
   it('submits selected account IDs from every page for backend eligibility checks', async () => {
@@ -376,7 +376,7 @@ describe('admin AccountsView bulk edit scope', () => {
     expect(probeUpstreamBillingBatch).toHaveBeenCalledWith([7, 11])
   })
 
-  it('reloads the server-sorted list after a batch probe changes a snapshot', async () => {
+  it('clears the removed sort preference and probes without reloading the list', async () => {
     localStorage.setItem('account-table-sort', JSON.stringify({ key: 'upstream_billing_rate', order: 'asc' }))
     const account = (id: number) => ({
       id,
@@ -444,6 +444,7 @@ describe('admin AccountsView bulk edit scope', () => {
     await flushPromises()
 
     expect(probeUpstreamBillingBatch).toHaveBeenCalledWith([7])
-    expect(listAccounts).toHaveBeenCalledTimes(2)
+    expect(listAccounts).toHaveBeenCalledTimes(1)
+    expect(localStorage.getItem('account-table-sort')).toBeNull()
   })
 })

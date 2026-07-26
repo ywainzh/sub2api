@@ -334,6 +334,7 @@ func registerAccountRoutes(admin *gin.RouterGroup, h *handler.Handlers, stepUpAu
 		accounts.POST("/upstream-billing-probe/batch", h.Admin.Account.ProbeUpstreamBillingBatch)
 		// Static route must remain before /:id.
 		accounts.POST("/status-check", h.Admin.Account.StatusCheck)
+		accounts.POST("/status-check/delete-accounts", h.Admin.Account.DeleteStatusCheckAccounts)
 		accounts.GET("/ollama-cloud-usage/settings", h.Admin.Account.GetOllamaCloudUsageSettings)
 		accounts.PUT("/ollama-cloud-usage/settings", h.Admin.Account.UpdateOllamaCloudUsageSettings)
 		accounts.GET("/:id", h.Admin.Account.GetByID)
