@@ -174,7 +174,6 @@ const routes: RouteRecordRaw[] = [
       title: 'Legal Document'
     }
   },
-
   // ==================== User Routes ====================
   {
     path: '/',

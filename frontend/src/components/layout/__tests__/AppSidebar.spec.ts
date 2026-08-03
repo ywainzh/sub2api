@@ -14,6 +14,16 @@ const headerPath = resolve(dirname(fileURLToPath(import.meta.url)), '../AppHeade
 const headerSource = readFileSync(headerPath, 'utf8')
 const routerPath = resolve(dirname(fileURLToPath(import.meta.url)), '../../../router/index.ts')
 const routerSource = readFileSync(routerPath, 'utf8')
+const loginPath = resolve(dirname(fileURLToPath(import.meta.url)), '../../../views/auth/LoginView.vue')
+const loginSource = readFileSync(loginPath, 'utf8')
+const registerPath = resolve(dirname(fileURLToPath(import.meta.url)), '../../../views/auth/RegisterView.vue')
+const registerSource = readFileSync(registerPath, 'utf8')
+const profilePath = resolve(dirname(fileURLToPath(import.meta.url)), '../../../views/user/ProfileView.vue')
+const profileSource = readFileSync(profilePath, 'utf8')
+const groupsPath = resolve(dirname(fileURLToPath(import.meta.url)), '../../../views/admin/GroupsView.vue')
+const groupsSource = readFileSync(groupsPath, 'utf8')
+const settingsPath = resolve(dirname(fileURLToPath(import.meta.url)), '../../../views/admin/SettingsView.vue')
+const settingsSource = readFileSync(settingsPath, 'utf8')
 
 describe('AppSidebar custom SVG styles', () => {
   it('does not override uploaded SVG fill or stroke colors', () => {
@@ -101,5 +111,15 @@ describe('single-user navigation', () => {
     expect(appSource).not.toContain('useAnnouncementStore')
     expect(headerSource).not.toContain('AnnouncementBell')
     expect(headerSource).not.toContain('SubscriptionProgressMini')
+  })
+
+  it('keeps optional upstream features hidden in the personal edition', () => {
+    expect(routerSource).not.toContain("name: 'ModelPlaza'")
+    expect(headerSource).not.toContain("path: '/model-plaza'")
+    expect(loginSource).toContain('const exposeOptionalAuthFeatures = false')
+    expect(registerSource).toContain('const exposeOptionalRegistrationFeatures = false')
+    expect(profileSource).toContain('const exposeOptionalProfileFeatures = false')
+    expect(groupsSource).toContain('const exposeAdvancedGroupFeatures = false')
+    expect(settingsSource).not.toContain('{ key: "agreement" as SettingsTab')
   })
 })
