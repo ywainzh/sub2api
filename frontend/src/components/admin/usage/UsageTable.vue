@@ -52,6 +52,16 @@
           <span class="text-sm text-gray-900 dark:text-white">{{ row.account?.name || '-' }}</span>
         </template>
 
+        <template #cell-client_source="{ row }">
+          <span
+            data-testid="usage-client-source"
+            class="inline-flex items-center rounded px-2 py-0.5 text-xs font-medium ring-1 ring-inset"
+            :class="getUsageClientSourceBadgeClass(row.client_source)"
+          >
+            {{ getUsageClientSourceLabel(row.client_source, t) }}
+          </span>
+        </template>
+
         <template #cell-model="{ row }">
           <div v-if="row.model_mapping_chain && row.model_mapping_chain.includes('→')" class="space-y-0.5 text-xs">
             <div v-for="(step, i) in row.model_mapping_chain.split('→')" :key="i"
@@ -467,6 +477,7 @@ import { formatDateTime, formatReasoningEffort } from '@/utils/format'
 import { formatCacheTokens, formatMultiplier } from '@/utils/formatters'
 import { formatTokenPricePerMillion } from '@/utils/usagePricing'
 import { getUsageServiceTierLabel } from '@/utils/usageServiceTier'
+import { getUsageClientSourceBadgeClass, getUsageClientSourceLabel } from '@/utils/usageClientSource'
 import { resolveUsageRequestType } from '@/utils/usageRequestType'
 import {
   LATENCY_BAR_CLASSES,

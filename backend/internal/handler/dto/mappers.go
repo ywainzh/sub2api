@@ -702,8 +702,13 @@ func UsageLogFromServiceAdmin(l *service.UsageLog) *AdminUsageLog {
 	}
 	usageLog := usageLogFromServiceUser(l)
 	usageLog.UpstreamEndpoint = l.UpstreamEndpoint
+	userAgent := ""
+	if l.UserAgent != nil {
+		userAgent = *l.UserAgent
+	}
 	return &AdminUsageLog{
 		UsageLog:              usageLog,
+		ClientSource:          service.DetectUsageClientSource(userAgent),
 		UpstreamModel:         l.UpstreamModel,
 		ChannelID:             l.ChannelID,
 		ModelMappingChain:     l.ModelMappingChain,

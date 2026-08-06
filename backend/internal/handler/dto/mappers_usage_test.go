@@ -132,6 +132,30 @@ func TestUsageLogFromService_UsesRequestedModelAndKeepsUpstreamAdminOnly(t *test
 	require.Contains(t, string(adminJSON), `"upstream_model":"claude-sonnet-4-20250514"`)
 }
 
+func TestUsageLogFromServiceAdmin_IncludesClientSourceOnlyForAdmin(t *testing.T) {
+	t.Parallel()
+
+	userAgent := "Claude Code/0.5.0 (Macos 15.5; arm64) iTerm2.app (Claude Code; 1.0.4)"
+	log := &service.UsageLog{
+		RequestID: "req_client_source",
+		Model:     "gpt-5.4",
+		UserAgent: &userAgent,
+	}
+
+	userDTO := UsageLogFromService(log)
+	adminDTO := UsageLogFromServiceAdmin(log)
+
+	require.Equal(t, service.UsageClientSourceClaude, adminDTO.ClientSource)
+
+	userJSON, err := json.Marshal(userDTO)
+	require.NoError(t, err)
+	require.NotContains(t, string(userJSON), `"client_source":`)
+
+	adminJSON, err := json.Marshal(adminDTO)
+	require.NoError(t, err)
+	require.Contains(t, string(adminJSON), `"client_source":"claude"`)
+}
+
 func TestUsageLogFromService_KeepsUserBillingAndIPWithoutAdminCostFields(t *testing.T) {
 	t.Parallel()
 

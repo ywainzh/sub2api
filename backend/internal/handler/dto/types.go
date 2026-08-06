@@ -552,6 +552,9 @@ type UsageLog struct {
 type AdminUsageLog struct {
 	UsageLog
 
+	// ClientSource is the inbound client family derived from the persisted User-Agent.
+	ClientSource service.UsageClientSource `json:"client_source"`
+
 	// UpstreamModel is the actual model sent to the upstream provider after mapping.
 	// Omitted when no mapping was applied (requested model was used as-is).
 	UpstreamModel *string `json:"upstream_model,omitempty"`

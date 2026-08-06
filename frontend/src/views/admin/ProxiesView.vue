@@ -417,13 +417,14 @@
             {{ t('admin.proxies.batchAdd') }}
           </button>
         </div>
-        <ProxyAdBanner />
       </div>
 
       <!-- Standard Add Form -->
       <form
         v-if="createMode === 'standard'"
         id="create-proxy-form"
+        autocomplete="off"
+        data-form-type="other"
         @submit.prevent="handleCreateProxy"
         class="space-y-5"
       >
@@ -470,8 +471,19 @@
           <input
             v-model="createForm.username"
             type="text"
+            name="proxy-create-principal"
+            autocomplete="off"
+            readonly
+            data-1p-ignore
+            data-lpignore="true"
+            data-bwignore="true"
+            spellcheck="false"
+            autocapitalize="off"
             class="input"
             :placeholder="t('admin.proxies.optionalAuth')"
+            @pointerdown="unlockProxyCredentialField"
+            @keydown="unlockProxyCredentialField"
+            @paste="unlockProxyCredentialField"
           />
         </div>
         <div>
@@ -480,8 +492,18 @@
             <input
               v-model="createForm.password"
               :type="createPasswordVisible ? 'text' : 'password'"
+              name="proxy-create-secret"
+              autocomplete="new-password"
+              readonly
+              data-1p-ignore
+              data-lpignore="true"
+              data-bwignore="true"
+              spellcheck="false"
               class="input pr-10"
               :placeholder="t('admin.proxies.optionalAuth')"
+              @pointerdown="unlockProxyCredentialField"
+              @keydown="unlockProxyCredentialField"
+              @paste="unlockProxyCredentialField"
             />
             <button
               type="button"
@@ -670,6 +692,8 @@
       <form
         v-if="editingProxy"
         id="edit-proxy-form"
+        autocomplete="off"
+        data-form-type="other"
         @submit.prevent="handleUpdateProxy"
         class="space-y-5"
       >
@@ -700,7 +724,22 @@
         </div>
         <div>
           <label class="input-label">{{ t('admin.proxies.username') }}</label>
-          <input v-model="editForm.username" type="text" class="input" />
+          <input
+            v-model="editForm.username"
+            type="text"
+            name="proxy-edit-principal"
+            autocomplete="off"
+            readonly
+            data-1p-ignore
+            data-lpignore="true"
+            data-bwignore="true"
+            spellcheck="false"
+            autocapitalize="off"
+            class="input"
+            @pointerdown="unlockProxyCredentialField"
+            @keydown="unlockProxyCredentialField"
+            @paste="unlockProxyCredentialField"
+          />
         </div>
         <div>
           <label class="input-label">{{ t('admin.proxies.password') }}</label>
@@ -708,8 +747,18 @@
             <input
               v-model="editForm.password"
               :type="editPasswordVisible ? 'text' : 'password'"
+              name="proxy-edit-secret"
+              autocomplete="new-password"
+              readonly
+              data-1p-ignore
+              data-lpignore="true"
+              data-bwignore="true"
+              spellcheck="false"
               :placeholder="t('admin.proxies.leaveEmptyToKeep')"
               class="input pr-10"
+              @pointerdown="unlockProxyCredentialField"
+              @keydown="unlockProxyCredentialField"
+              @paste="unlockProxyCredentialField"
               @input="editPasswordDirty = true"
             />
             <button
@@ -979,7 +1028,6 @@ import ConfirmDialog from '@/components/common/ConfirmDialog.vue'
 import EmptyState from '@/components/common/EmptyState.vue'
 import ImportDataModal from '@/components/admin/proxy/ImportDataModal.vue'
 import Select from '@/components/common/Select.vue'
-import ProxyAdBanner from '@/components/common/ProxyAdBanner.vue'
 import Icon from '@/components/icons/Icon.vue'
 import PlatformTypeBadge from '@/components/common/PlatformTypeBadge.vue'
 import { useClipboard } from '@/composables/useClipboard'
@@ -1036,6 +1084,17 @@ const editStatusOptions = computed(() => [
   { value: 'active', label: t('admin.accounts.status.active') },
   { value: 'inactive', label: t('admin.accounts.status.inactive') }
 ])
+
+// Keep proxy credentials read-only until the user explicitly interacts with
+// the field. Browsers may ignore autocomplete="off" for login-like forms;
+// readonly blocks silent account credential injection while pointer/keyboard
+// interaction immediately restores normal editing behavior.
+const unlockProxyCredentialField = (event: Event) => {
+  const input = event.currentTarget as HTMLInputElement | null
+  if (input) {
+    input.readOnly = false
+  }
+}
 
 const proxies = ref<Proxy[]>([])
 const visiblePasswordIds = reactive(new Set<number>())

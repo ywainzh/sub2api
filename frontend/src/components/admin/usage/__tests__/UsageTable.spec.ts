@@ -31,6 +31,9 @@ const messages: Record<string, string> = {
   'usage.original': 'Original',
   'usage.userBilled': 'User billed',
   'usage.accountBilled': 'Account billed',
+  'usage.clientSourceCodex': 'Codex',
+  'usage.clientSourceClaude': 'Claude',
+  'usage.clientSourceUnknown': 'Unknown',
   'usage.imageUnit': ' images',
   'usage.imageCount': 'Image count',
   'usage.imageBillingSize': 'Billing size',
@@ -68,6 +71,7 @@ const DataTableStub = {
   template: `
     <div>
       <div v-for="row in data" :key="row.request_id">
+        <slot name="cell-client_source" :row="row" />
         <slot name="cell-model" :row="row" :value="row.model" />
         <slot name="cell-billing_mode" :row="row" />
         <slot name="cell-tokens" :row="row" />
@@ -118,6 +122,34 @@ describe('admin UsageTable tooltip', () => {
       height: 20,
       toJSON: () => ({}),
     } as DOMRect)
+  })
+
+  it('renders Codex, Claude, and unknown client source badges', () => {
+    const wrapper = mount(UsageTable, {
+      props: {
+        data: [
+          { ...baseImageRow, request_id: 'req-source-codex', client_source: 'codex' },
+          { ...baseImageRow, request_id: 'req-source-claude', client_source: 'claude' },
+          { ...baseImageRow, request_id: 'req-source-unknown', client_source: 'unknown' },
+        ],
+        loading: false,
+        columns: [],
+      },
+      global: {
+        stubs: {
+          DataTable: DataTableStub,
+          EmptyState: true,
+          Icon: true,
+          Teleport: true,
+        },
+      },
+    })
+
+    const badges = wrapper.findAll('[data-testid="usage-client-source"]')
+    expect(badges.map((badge) => badge.text())).toEqual(['Codex', 'Claude', 'Unknown'])
+    expect(badges[0].classes()).toContain('bg-blue-100')
+    expect(badges[1].classes()).toContain('bg-orange-100')
+    expect(badges[2].classes()).toContain('bg-gray-100')
   })
 
   it('marks only usage rows that actually applied long-context billing', () => {
