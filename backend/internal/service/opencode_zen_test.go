@@ -41,8 +41,11 @@ func TestTransformOpenCodeZenChatBody(t *testing.T) {
 	require.NoError(t, json.Unmarshal(transformed, &payload))
 	require.NotContains(t, payload, "client_metadata")
 	require.Equal(t, true, payload["stream"])
-	messages := payload["messages"].([]any)
-	require.Equal(t, " ", messages[0].(map[string]any)["reasoning_content"])
+	messages, ok := payload["messages"].([]any)
+	require.True(t, ok)
+	firstMessage, ok := messages[0].(map[string]any)
+	require.True(t, ok)
+	require.Equal(t, " ", firstMessage["reasoning_content"])
 }
 
 func TestTransformOpenCodeZenChatBodyRejectsUnknownModel(t *testing.T) {
@@ -123,7 +126,9 @@ func TestOpenCode429UsesSixtySecondFallbackAndPersists(t *testing.T) {
 	require.WithinDuration(t, startedAt.Add(time.Minute), repo.resetAt, 2*time.Second)
 	blockedUntil, ok := service.openaiAccountRuntimeBlockUntil.Load(account.ID)
 	require.True(t, ok)
-	require.WithinDuration(t, repo.resetAt, blockedUntil.(time.Time), time.Second)
+	blockedAt, ok := blockedUntil.(time.Time)
+	require.True(t, ok)
+	require.WithinDuration(t, repo.resetAt, blockedAt, time.Second)
 }
 
 func TestApplyOpenCodeZenHeaders(t *testing.T) {

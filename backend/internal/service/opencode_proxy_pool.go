@@ -845,7 +845,7 @@ func (s *OpenCodeProxyPoolService) loadMihomoConfig(ctx context.Context, path st
 	if err != nil {
 		return fmt.Errorf("reload Mihomo candidate: %w", err)
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
 		body, _ := io.ReadAll(io.LimitReader(resp.Body, 4096))
 		return fmt.Errorf("reload Mihomo candidate HTTP %d: %s", resp.StatusCode, strings.TrimSpace(string(body)))
@@ -1081,12 +1081,13 @@ func (s *OpenCodeProxyPoolService) probeDirect(ctx context.Context) OpenCodeNode
 	result.OpenCodeHTTPStatus = resp.StatusCode
 	_, _ = io.Copy(io.Discard, io.LimitReader(resp.Body, 64<<10))
 	_ = resp.Body.Close()
-	if resp.StatusCode == http.StatusOK {
+	switch resp.StatusCode {
+	case http.StatusOK:
 		result.Success = true
 		result.HealthStatus = "healthy"
-	} else if resp.StatusCode == http.StatusTooManyRequests {
+	case http.StatusTooManyRequests:
 		result.HealthStatus, result.FailureType = "rate_limited", "rate_limited"
-	} else {
+	default:
 		result.HealthStatus, result.FailureType = "http_error", "http"
 	}
 	return result
@@ -1159,7 +1160,7 @@ func populateOpenCodeGeo(ctx context.Context, client *http.Client, result *OpenC
 	if err != nil {
 		return
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 	if resp.StatusCode != http.StatusOK {
 		return
 	}

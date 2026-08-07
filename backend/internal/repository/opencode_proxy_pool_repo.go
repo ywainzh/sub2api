@@ -45,7 +45,7 @@ func (r *openCodeProxyPoolRepository) ListSubscriptions(ctx context.Context) ([]
 	if err != nil {
 		return nil, err
 	}
-	defer rows.Close()
+	defer func() { _ = rows.Close() }()
 	items := make([]service.ProxySubscription, 0)
 	for rows.Next() {
 		item, scanErr := scanProxySubscription(rows)
@@ -164,7 +164,7 @@ func (r *openCodeProxyPoolRepository) ListNodes(ctx context.Context, subscriptio
 	if err != nil {
 		return nil, err
 	}
-	defer rows.Close()
+	defer func() { _ = rows.Close() }()
 	items := make([]service.ManagedProxyNode, 0)
 	for rows.Next() {
 		item, scanErr := scanManagedNode(rows)
@@ -181,7 +181,7 @@ func (r *openCodeProxyPoolRepository) UsedListenerPorts(ctx context.Context) (ma
 	if err != nil {
 		return nil, err
 	}
-	defer rows.Close()
+	defer func() { _ = rows.Close() }()
 	ports := make(map[int]struct{})
 	for rows.Next() {
 		var port int

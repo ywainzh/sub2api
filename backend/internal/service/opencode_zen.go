@@ -47,10 +47,10 @@ func normalizeOpenCodeModelID(value string) string {
 	for _, ch := range value {
 		isAlphaNum := ch >= 'a' && ch <= 'z' || ch >= '0' && ch <= '9' || ch == '.'
 		if isAlphaNum {
-			b.WriteRune(ch)
+			_, _ = b.WriteRune(ch)
 			lastDash = false
 		} else if !lastDash && b.Len() > 0 {
-			b.WriteByte('-')
+			_ = b.WriteByte('-')
 			lastDash = true
 		}
 	}
