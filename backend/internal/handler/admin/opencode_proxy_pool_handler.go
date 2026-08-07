@@ -7,6 +7,7 @@ import (
 	"strings"
 
 	"github.com/Wei-Shaw/sub2api/internal/pkg/response"
+	middleware2 "github.com/Wei-Shaw/sub2api/internal/server/middleware"
 	"github.com/Wei-Shaw/sub2api/internal/service"
 	"github.com/gin-gonic/gin"
 )
@@ -27,6 +28,14 @@ type updateProxySubscriptionRequest struct {
 
 type probeOpenCodeNodesRequest struct {
 	NodeIDs []int64 `json:"node_ids"`
+}
+
+type updateOpenCodePoolRequest struct {
+	Enabled             *bool   `json:"enabled"`
+	IncludeServerDirect *bool   `json:"include_server_direct"`
+	WorkerConcurrency   *int    `json:"worker_concurrency" binding:"omitempty,min=1,max=100"`
+	UpstreamAPIKey      *string `json:"upstream_api_key"`
+	ClearUpstreamAPIKey bool    `json:"clear_upstream_api_key"`
 }
 
 func (h *ProxyHandler) requireOpenCodeProxyPool(c *gin.Context) *service.OpenCodeProxyPoolService {
@@ -202,4 +211,106 @@ func (h *ProxyHandler) RefreshOpenCodeModels(c *gin.Context) {
 		return
 	}
 	response.Success(c, status)
+}
+
+func (h *ProxyHandler) GetOpenCodePool(c *gin.Context) {
+	poolService := h.requireOpenCodeProxyPool(c)
+	if poolService == nil {
+		return
+	}
+	pool, err := poolService.GetPool(c.Request.Context())
+	if err != nil {
+		writeOpenCodeProxyPoolError(c, err)
+		return
+	}
+	response.Success(c, pool)
+}
+
+func (h *ProxyHandler) UpdateOpenCodePool(c *gin.Context) {
+	poolService := h.requireOpenCodeProxyPool(c)
+	if poolService == nil {
+		return
+	}
+	var req updateOpenCodePoolRequest
+	if err := c.ShouldBindJSON(&req); err != nil {
+		response.BadRequest(c, "Invalid request: "+err.Error())
+		return
+	}
+	pool, err := poolService.UpdatePool(c.Request.Context(), service.OpenCodePoolUpdate{
+		Enabled:             req.Enabled,
+		IncludeServerDirect: req.IncludeServerDirect,
+		WorkerConcurrency:   req.WorkerConcurrency,
+		UpstreamAPIKey:      req.UpstreamAPIKey,
+		ClearUpstreamAPIKey: req.ClearUpstreamAPIKey,
+	})
+	if err != nil {
+		writeOpenCodeProxyPoolError(c, err)
+		return
+	}
+	response.Success(c, pool)
+}
+
+func (h *ProxyHandler) ListOpenCodePoolWorkers(c *gin.Context) {
+	poolService := h.requireOpenCodeProxyPool(c)
+	if poolService == nil {
+		return
+	}
+	workers, err := poolService.ListWorkers(c.Request.Context())
+	if err != nil {
+		writeOpenCodeProxyPoolError(c, err)
+		return
+	}
+	response.Success(c, workers)
+}
+
+func (h *ProxyHandler) ReconcileOpenCodePool(c *gin.Context) {
+	poolService := h.requireOpenCodeProxyPool(c)
+	if poolService == nil {
+		return
+	}
+	workers, err := poolService.ReconcileWorkers(c.Request.Context())
+	if err != nil {
+		writeOpenCodeProxyPoolError(c, err)
+		return
+	}
+	response.Success(c, workers)
+}
+
+func (h *ProxyHandler) BindAPIKeyToOpenCodePool(c *gin.Context) {
+	poolService := h.requireOpenCodeProxyPool(c)
+	if poolService == nil {
+		return
+	}
+	apiKeyID, err := strconv.ParseInt(c.Param("id"), 10, 64)
+	if err != nil || apiKeyID <= 0 {
+		response.BadRequest(c, "Invalid API key ID")
+		return
+	}
+	var boundBy *int64
+	if subject, ok := middleware2.GetAuthSubjectFromContext(c); ok && subject.UserID > 0 {
+		value := subject.UserID
+		boundBy = &value
+	}
+	if err := poolService.BindAPIKey(c.Request.Context(), apiKeyID, boundBy); err != nil {
+		writeOpenCodeProxyPoolError(c, err)
+		return
+	}
+	response.Success(c, gin.H{"opencode_bound": true})
+}
+
+func (h *ProxyHandler) UnbindAPIKeyFromOpenCodePool(c *gin.Context) {
+	poolService := h.requireOpenCodeProxyPool(c)
+	if poolService == nil {
+		return
+	}
+	apiKeyID, err := strconv.ParseInt(c.Param("id"), 10, 64)
+	if err != nil || apiKeyID <= 0 {
+		response.BadRequest(c, "Invalid API key ID")
+		return
+	}
+	if err := poolService.UnbindAPIKey(c.Request.Context(), apiKeyID); err != nil {
+		writeOpenCodeProxyPoolError(c, err)
+		return
+	}
+	response.Success(c, gin.H{"opencode_bound": false})
 }

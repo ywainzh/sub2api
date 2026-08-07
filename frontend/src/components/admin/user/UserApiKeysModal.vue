@@ -7,6 +7,25 @@
         </div>
         <div><p class="font-medium text-gray-900 dark:text-white">{{ user.email }}</p><p class="text-sm text-gray-500 dark:text-dark-400">{{ user.username }}</p></div>
       </div>
+      <div
+        v-if="openCodePool"
+        class="flex flex-wrap items-center justify-between gap-2 rounded-xl border px-4 py-3 text-sm"
+        :class="openCodePoolAvailable
+          ? 'border-emerald-200 bg-emerald-50 text-emerald-800 dark:border-emerald-700/50 dark:bg-emerald-900/20 dark:text-emerald-200'
+          : 'border-amber-200 bg-amber-50 text-amber-800 dark:border-amber-700/50 dark:bg-amber-900/20 dark:text-amber-200'"
+        role="status"
+      >
+        <span class="font-medium">
+          {{ openCodePoolAvailable
+            ? t('admin.users.openCodePoolHealthy', { count: openCodePool.active_workers })
+            : t('admin.users.openCodePoolUnavailable') }}
+        </span>
+        <span class="text-xs opacity-80">
+          {{ openCodePool.upstream_key_configured
+            ? t('admin.proxies.openCode.keyConfigured')
+            : t('admin.proxies.openCode.keyless') }}
+        </span>
+      </div>
       <div v-if="loading" class="flex justify-center py-8"><svg class="h-8 w-8 animate-spin text-primary-500" fill="none" viewBox="0 0 24 24"><circle class="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" stroke-width="4"></circle><path class="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z"></path></svg></div>
       <div v-else-if="apiKeys.length === 0" class="py-8 text-center"><p class="text-sm text-gray-500">{{ t('admin.users.noApiKeys') }}</p></div>
       <div v-else ref="scrollContainerRef" class="max-h-96 space-y-3 overflow-y-auto" @scroll="closeGroupSelector">
@@ -43,6 +62,43 @@
               </button>
             </div>
             <div class="flex items-center gap-1"><span>{{ t('admin.users.columns.created') }}: {{ formatDateTime(key.created_at) }}</span></div>
+          </div>
+          <div class="mt-3 flex items-center justify-between gap-4 rounded-lg border border-gray-100 bg-gray-50/80 px-3 py-2 dark:border-dark-600 dark:bg-dark-700/60">
+            <div class="min-w-0">
+              <p class="text-sm font-medium text-gray-800 dark:text-gray-100">{{ t('admin.users.appendOpenCode') }}</p>
+              <p class="mt-0.5 text-xs leading-5 text-gray-500 dark:text-gray-400">{{ t('admin.users.appendOpenCodeHint') }}</p>
+            </div>
+            <button
+              type="button"
+              role="switch"
+              :aria-checked="Boolean(key.opencode_bound)"
+              :aria-label="t('admin.users.appendOpenCode')"
+              :disabled="bindingKeyIds.has(key.id) || (!key.opencode_bound && !openCodePoolAvailable)"
+              :class="[
+                'relative h-11 w-14 shrink-0 cursor-pointer rounded-full border transition-colors duration-200 focus:outline-none focus:ring-2 focus:ring-primary-500 focus:ring-offset-2 disabled:cursor-not-allowed disabled:opacity-50 dark:focus:ring-offset-dark-800',
+                key.opencode_bound
+                  ? 'border-primary-600 bg-primary-600'
+                  : 'border-gray-300 bg-gray-200 dark:border-dark-500 dark:bg-dark-600'
+              ]"
+              @click="toggleOpenCodeBinding(key)"
+            >
+              <span
+                :class="[
+                  'absolute left-0 top-2.5 h-5 w-5 rounded-full bg-white shadow-sm transition-transform duration-200',
+                  key.opencode_bound ? 'translate-x-6' : 'translate-x-1.5'
+                ]"
+              />
+              <svg
+                v-if="bindingKeyIds.has(key.id)"
+                class="absolute inset-0 m-auto h-4 w-4 animate-spin text-white"
+                fill="none"
+                viewBox="0 0 24 24"
+                aria-hidden="true"
+              >
+                <circle class="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" stroke-width="4"></circle>
+                <path class="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z"></path>
+              </svg>
+            </button>
           </div>
         </div>
       </div>
@@ -112,6 +168,7 @@ import { useAppStore } from '@/stores/app'
 import { adminAPI } from '@/api/admin'
 import { formatDateTime } from '@/utils/format'
 import type { AdminUser, AdminGroup, ApiKey } from '@/types'
+import type { OpenCodePool } from '@/api/admin/proxies'
 import BaseDialog from '@/components/common/BaseDialog.vue'
 import GroupBadge from '@/components/common/GroupBadge.vue'
 import GroupOptionItem from '@/components/common/GroupOptionItem.vue'
@@ -125,6 +182,8 @@ const apiKeys = ref<ApiKey[]>([])
 const allGroups = ref<AdminGroup[]>([])
 const loading = ref(false)
 const updatingKeyIds = ref(new Set<number>())
+const bindingKeyIds = ref(new Set<number>())
+const openCodePool = ref<OpenCodePool | null>(null)
 const groupSelectorKeyId = ref<number | null>(null)
 const dropdownPosition = ref<{ top: number; left: number } | null>(null)
 const dropdownRef = ref<HTMLElement | null>(null)
@@ -135,6 +194,7 @@ const selectedKeyForGroup = computed(() => {
   if (groupSelectorKeyId.value === null) return null
   return apiKeys.value.find((k) => k.id === groupSelectorKeyId.value) || null
 })
+const openCodePoolAvailable = computed(() => Boolean(openCodePool.value?.enabled && openCodePool.value.active_workers > 0))
 
 const setGroupButtonRef = (keyId: number, el: Element | ComponentPublicInstance | null) => {
   if (el instanceof HTMLElement) {
@@ -143,15 +203,6 @@ const setGroupButtonRef = (keyId: number, el: Element | ComponentPublicInstance 
     groupButtonRefs.value.delete(keyId)
   }
 }
-
-watch(() => props.show, (v) => {
-  if (v && props.user) {
-    load()
-    loadGroups()
-  } else {
-    closeGroupSelector()
-  }
-})
 
 const load = async () => {
   if (!props.user) return
@@ -173,6 +224,15 @@ const loadGroups = async () => {
     allGroups.value = groups
   } catch (error) {
     console.error('Failed to load groups:', error)
+  }
+}
+
+const loadOpenCodePool = async () => {
+  try {
+    openCodePool.value = await adminAPI.proxies.getOpenCodePool()
+  } catch (error) {
+    openCodePool.value = null
+    console.error('Failed to load OpenCode pool:', error)
   }
 }
 
@@ -202,6 +262,20 @@ const closeGroupSelector = () => {
   dropdownPosition.value = null
 }
 
+watch(
+  () => props.show,
+  (v) => {
+    if (v && props.user) {
+      load()
+      loadGroups()
+      loadOpenCodePool()
+    } else {
+      closeGroupSelector()
+    }
+  },
+  { immediate: true }
+)
+
 const changeGroup = async (key: ApiKey, newGroupId: number | null) => {
   closeGroupSelector()
   if (key.group_id === newGroupId || (!key.group_id && newGroupId === null)) return
@@ -223,6 +297,35 @@ const changeGroup = async (key: ApiKey, newGroupId: number | null) => {
     appStore.showError(error?.message || t('admin.users.groupChangeFailed'))
   } finally {
     updatingKeyIds.value.delete(key.id)
+  }
+}
+
+const toggleOpenCodeBinding = async (key: ApiKey) => {
+  const nextBound = !key.opencode_bound
+  if (nextBound && !openCodePoolAvailable.value) return
+
+  bindingKeyIds.value = new Set(bindingKeyIds.value).add(key.id)
+  try {
+    if (nextBound) {
+      await adminAPI.apiKeys.bindOpenCodePool(key.id)
+    } else {
+      await adminAPI.apiKeys.unbindOpenCodePool(key.id)
+    }
+    const index = apiKeys.value.findIndex((item) => item.id === key.id)
+    if (index !== -1) {
+      apiKeys.value[index] = {
+        ...apiKeys.value[index],
+        opencode_bound: nextBound,
+        opencode_pool_id: nextBound ? openCodePool.value?.id ?? null : null
+      }
+    }
+    appStore.showSuccess(t('admin.users.openCodeBindingUpdated'))
+  } catch (error: any) {
+    appStore.showError(error?.message || t('admin.users.openCodeBindingFailed'))
+  } finally {
+    const next = new Set(bindingKeyIds.value)
+    next.delete(key.id)
+    bindingKeyIds.value = next
   }
 }
 

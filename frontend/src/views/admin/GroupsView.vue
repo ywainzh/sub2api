@@ -358,6 +358,7 @@
 
           <template #cell-actions="{ row }">
             <div class="flex items-center gap-1">
+              <template v-if="!isOpenCodeSystemGroup(row)">
               <button
                 @click="handleEdit(row)"
                 class="flex flex-col items-center gap-0.5 rounded-lg p-1.5 text-gray-500 transition-colors hover:bg-gray-100 hover:text-primary-600 dark:hover:bg-dark-700 dark:hover:text-primary-400"
@@ -420,6 +421,10 @@
                 <Icon name="trash" size="sm" />
                 <span class="text-xs">{{ t("common.delete") }}</span>
               </button>
+              </template>
+              <span v-else class="badge badge-gray whitespace-nowrap">
+                {{ t("admin.groups.systemManaged") }}
+              </span>
             </div>
           </template>
 
@@ -5807,6 +5812,8 @@ const handleCreateGroup = async () => {
     submitting.value = false;
   }
 };
+
+const isOpenCodeSystemGroup = (group: AdminGroup) => group.name === "OpenCode Zen Pool";
 
 const handleEdit = async (group: AdminGroup) => {
   editingGroup.value = group;

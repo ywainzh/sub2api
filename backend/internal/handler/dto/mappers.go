@@ -85,6 +85,8 @@ func APIKeyFromService(k *service.APIKey) *APIKey {
 		Key:                k.Key,
 		Name:               k.Name,
 		GroupID:            k.GroupID,
+		OpenCodePoolID:     k.OpenCodePoolID,
+		OpenCodeBound:      k.OpenCodePoolID != nil && *k.OpenCodePoolID > 0,
 		Status:             k.Status,
 		IPWhitelist:        k.IPWhitelist,
 		IPBlacklist:        k.IPBlacklist,

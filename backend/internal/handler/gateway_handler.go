@@ -57,6 +57,7 @@ type GatewayHandler struct {
 	maxAccountSwitchesGemini  int
 	cfg                       *config.Config
 	settingService            *service.SettingService
+	openCodeProxyPool         *service.OpenCodeProxyPoolService
 }
 
 // NewGatewayHandler creates a new GatewayHandler
@@ -1072,6 +1073,12 @@ func (h *GatewayHandler) Messages(c *gin.Context) {
 // Falls back to default models if no whitelist is configured
 func (h *GatewayHandler) Models(c *gin.Context) {
 	apiKey, _ := middleware2.GetAPIKeyFromContext(c)
+	appendOpenCodeModels := func(models []string) []string {
+		if h.openCodeProxyPool == nil {
+			return models
+		}
+		return h.openCodeProxyPool.AppendFreeModelsForAPIKey(apiKey, models)
+	}
 
 	var groupID *int64
 	var platform string
@@ -1088,14 +1095,16 @@ func (h *GatewayHandler) Models(c *gin.Context) {
 		availableModels := h.compositeAvailableModels(c.Request.Context(), groupID)
 		if apiKey != nil && apiKey.Group != nil && apiKey.Group.CustomModelsListEnabled() {
 			availableModels = filterModelsByCustomList(availableModels, defaultModelIDsForPlatform(service.PlatformComposite), apiKey.Group.ModelsListConfig.Models)
+			availableModels = appendOpenCodeModels(availableModels)
 			writeCustomModelsList(c, service.PlatformComposite, availableModels)
 			return
 		}
+		availableModels = appendOpenCodeModels(availableModels)
 		if len(availableModels) > 0 {
 			writeModelsList(c, service.PlatformComposite, availableModels)
 			return
 		}
-		writeModelsList(c, service.PlatformComposite, defaultModelIDsForPlatform(service.PlatformComposite))
+		writeModelsList(c, service.PlatformComposite, appendOpenCodeModels(defaultModelIDsForPlatform(service.PlatformComposite)))
 		return
 	}
 
@@ -1119,6 +1128,7 @@ func (h *GatewayHandler) Models(c *gin.Context) {
 			source = filterModelsByStrictCustomList(source, fallbackModels, apiKey.Group.ModelsListConfig.Models)
 		}
 		availableModels = service.FilterModelsByStrictWhitelist(source, apiKey.Group.ModelsListConfig.Models)
+		availableModels = appendOpenCodeModels(availableModels)
 		writeCustomModelsList(c, platform, availableModels)
 		return
 	}
@@ -1128,9 +1138,11 @@ func (h *GatewayHandler) Models(c *gin.Context) {
 			fallbackModels = service.OpenCodeFreeModelIDs()
 		}
 		availableModels = filterModelsByCustomList(customModelsListSource(platform, availableModels, fallbackModels), fallbackModels, apiKey.Group.ModelsListConfig.Models)
+		availableModels = appendOpenCodeModels(availableModels)
 		writeCustomModelsList(c, platform, availableModels)
 		return
 	}
+	availableModels = appendOpenCodeModels(availableModels)
 
 	if len(availableModels) > 0 {
 		writeModelsList(c, platform, availableModels)
@@ -1143,6 +1155,10 @@ func (h *GatewayHandler) Models(c *gin.Context) {
 
 	// Fallback to default models
 	if platform == service.PlatformOpenAI {
+		if apiKey != nil && apiKey.OpenCodePoolID != nil {
+			writeModelsList(c, platform, appendOpenCodeModels(defaultModelIDsForPlatform(platform)))
+			return
+		}
 		c.JSON(http.StatusOK, gin.H{
 			"object": "list",
 			"data":   openai.DefaultModels,
@@ -1151,6 +1167,10 @@ func (h *GatewayHandler) Models(c *gin.Context) {
 	}
 
 	if platform == service.PlatformGemini {
+		if apiKey != nil && apiKey.OpenCodePoolID != nil {
+			writeModelsList(c, platform, appendOpenCodeModels(defaultModelIDsForPlatform(platform)))
+			return
+		}
 		c.JSON(http.StatusOK, gin.H{
 			"object": "list",
 			"data":   geminicli.DefaultModels,
@@ -1158,14 +1178,15 @@ func (h *GatewayHandler) Models(c *gin.Context) {
 		return
 	}
 	if platform == service.PlatformGrok {
-		writeGrokModelsList(c, xai.DefaultModelIDs())
+		writeGrokModelsList(c, appendOpenCodeModels(xai.DefaultModelIDs()))
 		return
 	}
 
-	c.JSON(http.StatusOK, gin.H{
-		"object": "list",
-		"data":   claude.DefaultModels,
-	})
+	if apiKey != nil && apiKey.OpenCodePoolID != nil {
+		writeModelsList(c, platform, appendOpenCodeModels(defaultModelIDsForPlatform(platform)))
+		return
+	}
+	c.JSON(http.StatusOK, gin.H{"object": "list", "data": claude.DefaultModels})
 }
 
 func (h *GatewayHandler) compositeAvailableModels(ctx context.Context, groupID *int64) []string {

@@ -9,7 +9,8 @@
 | 部署目录 | `/opt/sub2api` |
 | 应用监听 | `127.0.0.1:39080` |
 | 公网域名 | `https://sub2api.zyspeed.xyz` |
-| 数据目录 | `/opt/sub2api/data`、`postgres_data`、`redis_data` |
+| 数据目录 | `/opt/sub2api/data`、`postgres_data`、`redis_data`、`opencode-mihomo` |
+| 隔离验收地址 | `127.0.0.1:39081`，数据位于 `/opt/sub2api/test-data` |
 | Docker socket GID | 服务器实际 `/var/run/docker.sock` 的 group id，当前服务器为 `121` |
 
 ## 版本规则
@@ -143,9 +144,89 @@ docker compose logs --tail=200 sub2api
 curl -fsS http://127.0.0.1:39080/health
 ```
 
-预期 3 个服务都是 `healthy`：`sub2api`、`sub2api-postgres`、`sub2api-redis`。
+预期 `sub2api`、`sub2api-postgres`、`sub2api-redis` 都是 `healthy`，`opencode-mihomo` 为 `running`。Mihomo Controller 和各节点 listener 只存在于 Docker 内网，不映射任何公网端口。
 
-资源上限已写入 Compose：应用 `384 MiB / 1 CPU`、PostgreSQL `256 MiB / 0.5 CPU`、Redis `128 MiB / 0.25 CPU`。PostgreSQL 和 Redis 仅在 Docker 内网监听，应用仅绑定 `127.0.0.1:39080`。
+资源上限已写入 Compose：应用 `384 MiB / 1 CPU`、Mihomo `256 MiB / 0.5 CPU`、PostgreSQL `256 MiB / 0.5 CPU`、Redis `128 MiB / 0.25 CPU`。PostgreSQL、Redis 和 Mihomo 仅在 Docker 内网监听，应用仅绑定 `127.0.0.1:39080`。
+
+## OpenCode 自动 Worker 池
+
+OpenCode 客户端始终使用统一入口：
+
+```text
+Base URL: https://sub2api.zyspeed.xyz/v1
+API Key: 已在后台绑定 OpenCode 池的 Sub2API Key
+```
+
+OpenCode Zen 上游 Key 与客户端使用的 Sub2API Key 是两层凭据。池保持 Keyless 时，上游 Key 留空，Worker 不发送 `Authorization`；客户端仍必须发送自己的 Sub2API Key。生产验收使用 API Key #3“测试国产模型”。
+
+管理员配置顺序：
+
+1. 在“代理管理 → OpenCode”确认订阅已同步，并对节点执行探测。
+2. 只有 `healthy`、非 429、出口 IP 唯一且探测时间不超过 15 分钟的节点会创建 Worker。
+3. 在池设置中保持启用，按需启用“服务器直连”，然后点击“立即对账”。服务器直连会采用最早的现有 `server_direct` OpenCode 账号。
+4. 在用户的 API Key 弹框中打开“追加 OpenCode”。生产只给 API Key #3 打开，Key #1、#2 保持不变。
+5. 请求免费模型时自动切到系统池；非免费模型继续使用 Key 原分组。免费模型命中但池无 Worker 时返回 `503 opencode_pool_unavailable`，不会回落普通账号或服务器直连。
+
+基础验证：
+
+```bash
+curl -fsS https://sub2api.zyspeed.xyz/v1/models \
+  -H 'Authorization: Bearer <Sub2API API Key #3>'
+
+curl -fsS https://sub2api.zyspeed.xyz/v1/chat/completions \
+  -H 'Authorization: Bearer <Sub2API API Key #3>' \
+  -H 'Content-Type: application/json' \
+  -d '{"model":"big-pickle","messages":[{"role":"user","content":"Reply OK"}],"stream":false}'
+```
+
+免费 OpenCode 请求仍保存账号、Worker、节点和 token 用量记录，但 `actual_cost=0`，不扣 API Key 金额配额。429 会立即换 Worker，并按上游 reset 时间或默认 60 秒冷却当前 Worker。
+
+## `39081` 隔离验收栈
+
+`docker-compose.test.yml` 使用独立 PostgreSQL、Redis、Mihomo 和数据目录，不挂载 Docker socket，也不连接生产 Docker 网络。它把服务器现有 `/opt/proxy-service/config.yaml` 只读挂载到内部 seed 服务，供测试后台以 HTTP 订阅导入；生产栈不能访问该 seed 服务。
+
+部署发布镜像后创建测试配置：
+
+```bash
+cd /opt/sub2api
+test -f /opt/proxy-service/config.yaml
+umask 077
+cp .env.test.example .env.test
+
+test_postgres_password=$(openssl rand -hex 32)
+test_redis_password=$(openssl rand -hex 32)
+test_jwt_secret=$(openssl rand -hex 32)
+test_totp_key=$(openssl rand -hex 32)
+test_admin_password=$(openssl rand -hex 16)
+test_mihomo_secret=$(openssl rand -hex 32)
+
+sed -i "s#^TEST_POSTGRES_PASSWORD=.*#TEST_POSTGRES_PASSWORD=${test_postgres_password}#" .env.test
+sed -i "s#^TEST_REDIS_PASSWORD=.*#TEST_REDIS_PASSWORD=${test_redis_password}#" .env.test
+sed -i "s#^TEST_JWT_SECRET=.*#TEST_JWT_SECRET=${test_jwt_secret}#" .env.test
+sed -i "s#^TEST_TOTP_ENCRYPTION_KEY=.*#TEST_TOTP_ENCRYPTION_KEY=${test_totp_key}#" .env.test
+sed -i "s#^TEST_ADMIN_PASSWORD=.*#TEST_ADMIN_PASSWORD=${test_admin_password}#" .env.test
+sed -i "s#^TEST_OPENCODE_MIHOMO_SECRET=.*#TEST_OPENCODE_MIHOMO_SECRET=${test_mihomo_secret}#" .env.test
+unset test_postgres_password test_redis_password test_jwt_secret test_totp_key test_admin_password test_mihomo_secret
+
+chmod 600 .env.test
+mkdir -p test-data/app test-data/postgres test-data/redis test-data/opencode-mihomo
+cp -n opencode-mihomo/config.yaml test-data/opencode-mihomo/config.yaml
+
+docker compose --env-file .env.test -f docker-compose.test.yml config --quiet
+docker compose --env-file .env.test -f docker-compose.test.yml pull
+docker compose --env-file .env.test -f docker-compose.test.yml up -d
+docker compose --env-file .env.test -f docker-compose.test.yml ps
+curl -fsS http://127.0.0.1:39081/health
+```
+
+登录隔离后台后，添加订阅地址 `http://opencode-seed/config.yaml`，依次执行同步、全量探测和 Worker 对账。至少验证两个 listener 并发出口、代理故障只换 Worker、无隐式直连，以及 Sub2API/Mihomo 重启后的 Worker 和租约恢复。
+
+验收完成后停止隔离栈；该操作不触碰生产容器和生产数据：
+
+```bash
+cd /opt/sub2api
+docker compose --env-file .env.test -f docker-compose.test.yml down
+```
 
 ## Nginx 和 HTTPS
 
@@ -178,6 +259,22 @@ curl -fsS -H 'Host: sub2api.zyspeed.xyz' http://127.0.0.1/health
 ## 升级到新版本
 
 升级不会重新构建，不会删除数据目录。当前 Compose 已包含 Docker socket 挂载，版本菜单会直接执行在线更新。以 `v0.1.1` 为例：
+
+升级 OpenCode Worker 池版本前，先备份数据库、环境文件和 Compose，并轮换 Mihomo Controller secret：
+
+```bash
+cd /opt/sub2api
+./backup.sh
+cp .env "backups/.env.$(date +%Y%m%d-%H%M%S)"
+cp docker-compose.yml "backups/docker-compose.$(date +%Y%m%d-%H%M%S).yml"
+
+opencode_mihomo_secret=$(openssl rand -hex 32)
+sed -i "s#^OPENCODE_MIHOMO_SECRET=.*#OPENCODE_MIHOMO_SECRET=${opencode_mihomo_secret}#" .env
+unset opencode_mihomo_secret
+chmod 600 .env
+```
+
+旧 Controller secret 不再继续使用。升级后必须同时确认 `sub2api` 与 `opencode-mihomo` 使用新值并正常通信。
 
 1. 在管理后台右上角版本菜单点击“立即更新”。
 2. 后端校验最新版本必须是固定的 `vX.Y.Z`，拉取 `ghcr.io/ywainzh/sub2api:v0.1.1`。
@@ -226,6 +323,8 @@ curl -fsS https://sub2api.zyspeed.xyz/health
 ## 回滚
 
 在管理后台版本菜单展开“版本回退”，选择最近的固定版本即可在线回滚。Docker 回滚同样先拉取目标 GHCR 镜像，再由助手切换 `.env` 并重建 `sub2api`；不会回滚数据库内容。
+
+从 `v0.2.0` 回滚到 `v0.1.20` 前，先在后台解绑 API Key #3，停用 OpenCode 池并执行一次对账。对账会停用系统 Worker并释放出口租约，然后再切换旧镜像。迁移 195 新增的表可以保留，旧版普通 OpenAI 账号不使用这些表。
 
 服务器无法访问后台时，也可以手工回滚镜像：
 
@@ -280,7 +379,7 @@ curl -fsS https://sub2api.zyspeed.xyz/health
 
 故障处理顺序：
 
-1. `docker compose ps` 确认三项健康状态。
+1. `docker compose ps` 确认应用、PostgreSQL、Redis 健康，Mihomo 正常运行。
 2. 查看 `docker compose logs --tail=200 sub2api`。
 3. 确认 `.env` 存在、权限为 `600`，且 `APP_IMAGE` 不是 `latest`。
 4. 检查 `free -h`、`docker stats` 和 `df -h /`；服务器内存紧张时不要在服务器构建镜像。

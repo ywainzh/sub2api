@@ -118,6 +118,11 @@ func normalizeUserRole(role, fallback string) (string, error) {
 }
 
 func (s *adminServiceImpl) CreateUser(ctx context.Context, input *CreateUserInput) (*User, error) {
+	for _, groupID := range input.AllowedGroups {
+		if err := s.rejectOpenCodeSystemGroupMutation(ctx, groupID); err != nil {
+			return nil, err
+		}
+	}
 	balance := 0.0
 	if input.Balance != nil {
 		balance = *input.Balance
@@ -196,6 +201,9 @@ func (s *adminServiceImpl) UpdateUser(ctx context.Context, id int64, input *Upda
 	// 校验用户专属分组倍率：必须 > 0（nil 合法，表示清除专属倍率）
 	if input.GroupRates != nil {
 		for groupID, rate := range input.GroupRates {
+			if err := s.rejectOpenCodeSystemGroupMutation(ctx, groupID); err != nil {
+				return nil, err
+			}
 			if rate != nil && *rate <= 0 {
 				return nil, fmt.Errorf("rate_multiplier must be > 0 (group_id=%d)", groupID)
 			}
@@ -275,6 +283,11 @@ func (s *adminServiceImpl) UpdateUser(ctx context.Context, id int64, input *Upda
 	}
 
 	if input.AllowedGroups != nil {
+		for _, groupID := range *input.AllowedGroups {
+			if err := s.rejectOpenCodeSystemGroupMutation(ctx, groupID); err != nil {
+				return nil, err
+			}
+		}
 		user.AllowedGroups = *input.AllowedGroups
 		fields.AllowedGroups = true
 	}

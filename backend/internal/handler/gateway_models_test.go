@@ -19,6 +19,26 @@ type gatewayModelsAccountRepoStub struct {
 	byGroup map[int64][]service.Account
 }
 
+type gatewayModelsOpenCodeRepoStub struct {
+	service.OpenCodeProxyPoolRepository
+	pool *service.OpenCodePool
+}
+
+func (s *gatewayModelsOpenCodeRepoStub) EnsureDefaultPool(context.Context) (*service.OpenCodePool, error) {
+	clone := *s.pool
+	return &clone, nil
+}
+
+type gatewayModelsGroupRepoStub struct {
+	service.GroupRepository
+	group *service.Group
+}
+
+func (s *gatewayModelsGroupRepoStub) GetByID(context.Context, int64) (*service.Group, error) {
+	clone := *s.group
+	return &clone, nil
+}
+
 type gatewayModelsResponseForTest struct {
 	Object string                    `json:"object"`
 	Data   []gatewayModelItemForTest `json:"data"`
@@ -99,6 +119,46 @@ func TestGatewayModels_GeminiGroupFallsBackToGeminiModels(t *testing.T) {
 	require.Equal(t, "list", got.Object)
 	require.Contains(t, modelIDsForTest(got.Data), "gemini-2.5-flash")
 	require.NotContains(t, modelIDsForTest(got.Data), "claude-sonnet-4-6")
+}
+
+func TestGatewayModels_BoundKeyReturnsOriginalAndOpenCodeFreeModelUnion(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	originalGroupID, poolGroupID, poolID := int64(22), int64(99), int64(1)
+	h := newGatewayModelsHandlerForTest(&gatewayModelsAccountRepoStub{byGroup: map[int64][]service.Account{
+		originalGroupID: {
+			{ID: 1, Platform: service.PlatformOpenAI, Credentials: map[string]any{
+				"model_mapping": map[string]any{"gpt-original": "gpt-original"},
+			}},
+		},
+	}})
+	poolService := service.NewOpenCodeProxyPoolService(
+		&gatewayModelsOpenCodeRepoStub{pool: &service.OpenCodePool{ID: poolID, GroupID: poolGroupID, Enabled: true}},
+		nil, nil, nil,
+		&gatewayModelsGroupRepoStub{group: &service.Group{ID: poolGroupID, Name: "OpenCode Zen Pool", Platform: service.PlatformOpenAI}},
+	)
+	_, err := poolService.BootstrapPool(context.Background())
+	require.NoError(t, err)
+	h.openCodeProxyPool = poolService
+
+	rec := httptest.NewRecorder()
+	c, _ := gin.CreateTestContext(rec)
+	c.Request = httptest.NewRequest(http.MethodGet, "/v1/models", nil)
+	c.Set(string(middleware2.ContextKeyAPIKey), &service.APIKey{
+		OpenCodePoolID: &poolID,
+		GroupID:        &originalGroupID,
+		Group:          &service.Group{ID: originalGroupID, Platform: service.PlatformOpenAI},
+	})
+
+	h.Models(c)
+	require.Equal(t, http.StatusOK, rec.Code)
+	var got gatewayModelsResponseForTest
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &got))
+	ids := modelIDsForTest(got.Data)
+	require.Contains(t, ids, "gpt-original")
+	freeModels := poolService.FreeModelIDs()
+	require.NotEmpty(t, freeModels)
+	require.Contains(t, ids, freeModels[0])
+	require.Equal(t, len(ids), len(uniqueStringsForTest(ids)))
 }
 
 func TestGatewayModels_Grok45AdvertisesReasoningEffortForGrokBuild(t *testing.T) {
@@ -832,4 +892,17 @@ func modelIDsForTest(models []gatewayModelItemForTest) []string {
 		ids = append(ids, model.ID)
 	}
 	return ids
+}
+
+func uniqueStringsForTest(values []string) []string {
+	seen := make(map[string]struct{}, len(values))
+	out := make([]string, 0, len(values))
+	for _, value := range values {
+		if _, ok := seen[value]; ok {
+			continue
+		}
+		seen[value] = struct{}{}
+		out = append(out, value)
+	}
+	return out
 }

@@ -84,7 +84,7 @@ func (r *apiKeyRepository) GetByID(ctx context.Context, id int64) (*service.APIK
 		}
 		return nil, err
 	}
-	return apiKeyEntityToService(m), nil
+	return r.attachOpenCodePoolBinding(ctx, apiKeyEntityToService(m))
 }
 
 // GetKeyAndOwnerID 根据 API Key ID 获取其 key 与所有者（用户）ID。
@@ -122,7 +122,7 @@ func (r *apiKeyRepository) GetByKey(ctx context.Context, key string) (*service.A
 		}
 		return nil, err
 	}
-	return apiKeyEntityToService(m), nil
+	return r.attachOpenCodePoolBinding(ctx, apiKeyEntityToService(m))
 }
 
 func (r *apiKeyRepository) GetByKeyForAuth(ctx context.Context, key string) (*service.APIKey, error) {
@@ -225,7 +225,7 @@ func (r *apiKeyRepository) GetByKeyForAuth(ctx context.Context, key string) (*se
 		}
 		return nil, err
 	}
-	return apiKeyEntityToService(m), nil
+	return r.attachOpenCodePoolBinding(ctx, apiKeyEntityToService(m))
 }
 
 func (r *apiKeyRepository) Update(ctx context.Context, key *service.APIKey, fields service.APIKeyUpdateFields) error {
@@ -469,6 +469,9 @@ func (r *apiKeyRepository) ListByUserID(ctx context.Context, userID int64, param
 	if err := r.attachLastUsedIPs(ctx, outKeys); err != nil {
 		return nil, nil, err
 	}
+	if err := r.attachOpenCodePoolBindings(ctx, outKeys); err != nil {
+		return nil, nil, err
+	}
 
 	return outKeys, paginationResultFromTotal(int64(total), params), nil
 }
@@ -487,6 +490,9 @@ func (r *apiKeyRepository) ListAllByUserID(ctx context.Context, userID int64, fi
 		outKeys = append(outKeys, *apiKeyEntityToService(keys[i]))
 	}
 	if err := r.attachLastUsedIPs(ctx, outKeys); err != nil {
+		return nil, err
+	}
+	if err := r.attachOpenCodePoolBindings(ctx, outKeys); err != nil {
 		return nil, err
 	}
 	return outKeys, nil
@@ -630,6 +636,9 @@ func (r *apiKeyRepository) ListByGroupID(ctx context.Context, groupID int64, par
 	for i := range keys {
 		outKeys = append(outKeys, *apiKeyEntityToService(keys[i]))
 	}
+	if err := r.attachOpenCodePoolBindings(ctx, outKeys); err != nil {
+		return nil, nil, err
+	}
 
 	return outKeys, paginationResultFromTotal(int64(total), params), nil
 }
@@ -690,7 +699,79 @@ func (r *apiKeyRepository) SearchAPIKeys(ctx context.Context, userID int64, keyw
 	for i := range keys {
 		outKeys = append(outKeys, *apiKeyEntityToService(keys[i]))
 	}
+	if err := r.attachOpenCodePoolBindings(ctx, outKeys); err != nil {
+		return nil, err
+	}
 	return outKeys, nil
+}
+
+func (r *apiKeyRepository) attachOpenCodePoolBinding(ctx context.Context, key *service.APIKey) (*service.APIKey, error) {
+	if key == nil {
+		return nil, nil
+	}
+	items := []service.APIKey{*key}
+	if err := r.attachOpenCodePoolBindings(ctx, items); err != nil {
+		return nil, err
+	}
+	*key = items[0]
+	return key, nil
+}
+
+func (r *apiKeyRepository) attachOpenCodePoolBindings(ctx context.Context, keys []service.APIKey) (err error) {
+	if len(keys) == 0 || r.sql == nil {
+		return nil
+	}
+	ids := make([]int64, 0, len(keys))
+	index := make(map[int64]int, len(keys))
+	for i := range keys {
+		if keys[i].ID <= 0 {
+			continue
+		}
+		ids = append(ids, keys[i].ID)
+		index[keys[i].ID] = i
+		keys[i].OpenCodePoolID = nil
+	}
+	if len(ids) == 0 {
+		return nil
+	}
+
+	query := `SELECT api_key_id, pool_id FROM api_key_opencode_bindings WHERE api_key_id = ANY($1::bigint[])`
+	args := []any{pq.Array(ids)}
+	if r.client.Driver().Dialect() != dialect.Postgres {
+		placeholders := make([]string, len(ids))
+		args = make([]any, len(ids))
+		for i, id := range ids {
+			placeholders[i] = "?"
+			args[i] = id
+		}
+		query = `SELECT api_key_id, pool_id FROM api_key_opencode_bindings WHERE api_key_id IN (` + strings.Join(placeholders, ",") + `)`
+	}
+	rows, err := r.sql.QueryContext(ctx, query, args...)
+	if err != nil {
+		// Lightweight SQLite repository tests use the Ent schema without raw
+		// PostgreSQL migrations. Treat the optional binding table as empty there;
+		// production PostgreSQL must have migration 195 and still fails closed.
+		if r.client.Driver().Dialect() != dialect.Postgres && strings.Contains(strings.ToLower(err.Error()), "no such table") {
+			return nil
+		}
+		return err
+	}
+	defer func() {
+		if closeErr := rows.Close(); closeErr != nil && err == nil {
+			err = closeErr
+		}
+	}()
+	for rows.Next() {
+		var apiKeyID, poolID int64
+		if err := rows.Scan(&apiKeyID, &poolID); err != nil {
+			return err
+		}
+		if i, ok := index[apiKeyID]; ok {
+			value := poolID
+			keys[i].OpenCodePoolID = &value
+		}
+	}
+	return rows.Err()
 }
 
 // ClearGroupIDByGroupID 将指定分组的所有 API Key 的 group_id 设为 nil

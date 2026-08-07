@@ -71,6 +71,8 @@ services:
     mem_limit: 384m
     cpus: 1.0
     pids_limit: 256
+    security_opt:
+      - no-new-privileges:true
 
   opencode-mihomo:
     image: ${OPENCODE_MIHOMO_IMAGE:-metacubex/mihomo:v1.19.17}

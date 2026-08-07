@@ -503,6 +503,12 @@ func registerOpenCodeProxyRoutes(admin *gin.RouterGroup, h *handler.Handlers) {
 	admin.POST("/opencode/proxies/probe", h.Admin.Proxy.ProbeOpenCodeProxies)
 	admin.GET("/opencode/models", h.Admin.Proxy.GetOpenCodeModels)
 	admin.POST("/opencode/models/refresh", h.Admin.Proxy.RefreshOpenCodeModels)
+	admin.GET("/opencode/pool", h.Admin.Proxy.GetOpenCodePool)
+	admin.PUT("/opencode/pool", h.Admin.Proxy.UpdateOpenCodePool)
+	admin.GET("/opencode/pool/workers", h.Admin.Proxy.ListOpenCodePoolWorkers)
+	admin.POST("/opencode/pool/reconcile", h.Admin.Proxy.ReconcileOpenCodePool)
+	admin.PUT("/api-keys/:id/opencode-binding", h.Admin.Proxy.BindAPIKeyToOpenCodePool)
+	admin.DELETE("/api-keys/:id/opencode-binding", h.Admin.Proxy.UnbindAPIKeyFromOpenCodePool)
 }
 
 func registerRedeemCodeRoutes(admin *gin.RouterGroup, h *handler.Handlers) {

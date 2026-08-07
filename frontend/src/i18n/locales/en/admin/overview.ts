@@ -558,6 +558,12 @@ export default {
       groupChangedSuccess: 'Group updated successfully',
       groupChangedWithGrant: 'Group updated. User auto-granted access to "{group}"',
       groupChangeFailed: 'Failed to update group',
+      appendOpenCode: 'Append OpenCode',
+      appendOpenCodeHint: 'Free models use the OpenCode worker pool; other models stay on the current group.',
+      openCodePoolHealthy: 'Worker pool available ({count})',
+      openCodePoolUnavailable: 'Worker pool is currently unavailable',
+      openCodeBindingUpdated: 'OpenCode routing updated',
+      openCodeBindingFailed: 'Failed to update OpenCode routing',
       noUsersYet: 'No users yet',
       createFirstUser: 'Create your first user to get started.',
       userCreated: 'User created successfully',
@@ -769,6 +775,7 @@ export default {
 
     // Groups
     groups: {
+      systemManaged: 'System managed (read-only)',
       title: 'Group Management',
       description: 'Manage API key groups and rate multipliers',
       searchGroups: 'Search groups...',

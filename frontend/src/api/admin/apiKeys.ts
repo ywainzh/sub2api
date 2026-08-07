@@ -26,8 +26,20 @@ export async function updateApiKeyGroup(id: number, groupId: number | null): Pro
   return data
 }
 
+export async function bindOpenCodePool(id: number): Promise<{ opencode_bound: boolean }> {
+  const { data } = await apiClient.put<{ opencode_bound: boolean }>(`/admin/api-keys/${id}/opencode-binding`)
+  return data
+}
+
+export async function unbindOpenCodePool(id: number): Promise<{ opencode_bound: boolean }> {
+  const { data } = await apiClient.delete<{ opencode_bound: boolean }>(`/admin/api-keys/${id}/opencode-binding`)
+  return data
+}
+
 export const apiKeysAPI = {
-  updateApiKeyGroup
+  updateApiKeyGroup,
+  bindOpenCodePool,
+  unbindOpenCodePool
 }
 
 export default apiKeysAPI

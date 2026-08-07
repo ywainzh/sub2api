@@ -139,6 +139,7 @@ jobs:
           cp sub2api LICENSE README.md README_CN.md "${binary_dir}/"
           cp -a deploy/lite/. "${deploy_dir}/"
           sed -i "s#^APP_IMAGE=.*#APP_IMAGE=ghcr.io/${GITHUB_REPOSITORY,,}:${GITHUB_REF_NAME}#" "${deploy_dir}/.env.example"
+          sed -i "s#^TEST_APP_IMAGE=.*#TEST_APP_IMAGE=ghcr.io/${GITHUB_REPOSITORY,,}:${GITHUB_REF_NAME}#" "${deploy_dir}/.env.test.example"
           tar -czf release-assets/sub2api-linux-amd64.tar.gz -C "${binary_dir}" .
           tar -czf "release-assets/sub2api-deploy-${GITHUB_REF_NAME}.tar.gz" -C "${deploy_dir}" .
           cd release-assets
@@ -190,7 +191,16 @@ jobs:
           TOTP_ENCRYPTION_KEY: 0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef
           ADMIN_PASSWORD: ci-admin-password
           OPENCODE_MIHOMO_SECRET: 0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef
-        run: docker compose -f deploy/lite/docker-compose.yml config --quiet
+          TEST_APP_IMAGE: ghcr.io/ywainzh/sub2api:${{ github.ref_name }}
+          TEST_POSTGRES_PASSWORD: ci-test-postgres-password
+          TEST_REDIS_PASSWORD: ci-test-redis-password
+          TEST_JWT_SECRET: 1123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef
+          TEST_TOTP_ENCRYPTION_KEY: 1123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef
+          TEST_ADMIN_PASSWORD: ci-test-admin-password
+          TEST_OPENCODE_MIHOMO_SECRET: 1123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef
+        run: |
+          docker compose -f deploy/lite/docker-compose.yml config --quiet
+          docker compose -f deploy/lite/docker-compose.test.yml config --quiet
 
       - name: Log in to GHCR
         uses: docker/login-action@v3

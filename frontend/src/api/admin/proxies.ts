@@ -76,6 +76,46 @@ export interface OpenCodeModelRegistryStatus {
   using_baseline: boolean
 }
 
+export interface OpenCodePool {
+  id: number
+  name: string
+  group_id: number
+  enabled: boolean
+  upstream_key_configured: boolean
+  include_server_direct: boolean
+  worker_concurrency: number
+  reconcile_status: string
+  reconcile_error?: string
+  last_reconciled_at?: string | null
+  active_workers: number
+  healthy_nodes: number
+  rate_limited_nodes: number
+  duplicate_nodes: number
+  failed_nodes: number
+  server_direct_status?: string
+  created_at: string
+  updated_at: string
+}
+
+export interface OpenCodePoolWorker {
+  id: number
+  pool_id: number
+  managed_node_id?: number | null
+  account_id: number
+  proxy_id?: number | null
+  display_name: string
+  egress_mode: 'proxy' | 'server_direct'
+  exit_ip?: string
+  status: string
+  error_reason?: string
+  health_status?: string
+  opencode_http_status?: number | null
+  last_probe_at?: string | null
+  rate_limit_reset_at?: string | null
+  created_at: string
+  updated_at: string
+}
+
 /**
  * List all proxies with pagination
  * @param page - Page number (default: 1)
@@ -371,6 +411,32 @@ export async function refreshOpenCodeModels(): Promise<OpenCodeModelRegistryStat
   return data
 }
 
+export async function getOpenCodePool(): Promise<OpenCodePool> {
+  const { data } = await apiClient.get<OpenCodePool>('/admin/opencode/pool')
+  return data
+}
+
+export async function updateOpenCodePool(input: {
+  enabled?: boolean
+  include_server_direct?: boolean
+  worker_concurrency?: number
+  upstream_api_key?: string
+  clear_upstream_api_key?: boolean
+}): Promise<OpenCodePool> {
+  const { data } = await apiClient.put<OpenCodePool>('/admin/opencode/pool', input)
+  return data
+}
+
+export async function listOpenCodePoolWorkers(): Promise<OpenCodePoolWorker[]> {
+  const { data } = await apiClient.get<OpenCodePoolWorker[]>('/admin/opencode/pool/workers')
+  return data
+}
+
+export async function reconcileOpenCodePool(): Promise<OpenCodePoolWorker[]> {
+  const { data } = await apiClient.post<OpenCodePoolWorker[]>('/admin/opencode/pool/reconcile')
+  return data
+}
+
 export const proxiesAPI = {
   list,
   getAll,
@@ -396,7 +462,11 @@ export const proxiesAPI = {
   listSubscriptionNodes,
   probeOpenCodeNodes,
   getOpenCodeModels,
-  refreshOpenCodeModels
+  refreshOpenCodeModels,
+  getOpenCodePool,
+  updateOpenCodePool,
+  listOpenCodePoolWorkers,
+  reconcileOpenCodePool
 }
 
 export default proxiesAPI

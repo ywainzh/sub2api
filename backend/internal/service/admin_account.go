@@ -20,9 +20,23 @@ import (
 )
 
 // Account management implementations
+type adminVisibleAccountRepository interface {
+	ListAdminWithFilters(context.Context, pagination.PaginationParams, string, string, string, string, int64, string) ([]Account, *pagination.PaginationResult, error)
+	ListAllAdminWithFilters(context.Context, string, string, string, string, int64, string) ([]Account, error)
+}
+
 func (s *adminServiceImpl) ListAccounts(ctx context.Context, page, pageSize int, platform, accountType, status, search string, groupID int64, privacyMode string, sortBy, sortOrder string) ([]Account, int64, error) {
 	params := pagination.PaginationParams{Page: page, PageSize: pageSize, SortBy: sortBy, SortOrder: sortOrder}
-	accounts, result, err := s.accountRepo.ListWithFilters(ctx, params, platform, accountType, status, search, groupID, privacyMode)
+	var (
+		accounts []Account
+		result   *pagination.PaginationResult
+		err      error
+	)
+	if repo, ok := s.accountRepo.(adminVisibleAccountRepository); ok {
+		accounts, result, err = repo.ListAdminWithFilters(ctx, params, platform, accountType, status, search, groupID, privacyMode)
+	} else {
+		accounts, result, err = s.accountRepo.ListWithFilters(ctx, params, platform, accountType, status, search, groupID, privacyMode)
+	}
 	if err != nil {
 		return nil, 0, err
 	}
@@ -32,6 +46,9 @@ func (s *adminServiceImpl) ListAccounts(ctx context.Context, page, pageSize int,
 func (s *adminServiceImpl) ListAccountsForSchedulerScoreFilter(ctx context.Context, platform, accountType, status, search string, groupID int64, privacyMode string) ([]Account, error) {
 	if s == nil || s.accountRepo == nil {
 		return nil, nil
+	}
+	if repo, ok := s.accountRepo.(adminVisibleAccountRepository); ok {
+		return repo.ListAllAdminWithFilters(ctx, platform, accountType, status, search, groupID, privacyMode)
 	}
 	return s.accountRepo.ListAllWithFilters(ctx, platform, accountType, status, search, groupID, privacyMode)
 }
@@ -234,6 +251,9 @@ func cloneAccountValuePointer[T any](value *T) *T {
 // account cannot mutate the in-memory source. Linked credential shadows are excluded because they
 // intentionally do not own credentials and must be created through CreateShadow.
 func (s *adminServiceImpl) DuplicateAccount(ctx context.Context, id int64, actorScope, operationKey string) (*Account, error) {
+	if err := s.rejectOpenCodeSystemAccountMutation(ctx, id); err != nil {
+		return nil, err
+	}
 	operationID := duplicateAccountOperationID(id, actorScope, operationKey)
 	existing, err := s.RecoverDuplicateAccount(ctx, id, actorScope, operationKey)
 	if err != nil {
@@ -612,6 +632,9 @@ func (s *adminServiceImpl) CreateAccount(ctx context.Context, input *CreateAccou
 }
 
 func (s *adminServiceImpl) UpdateAccount(ctx context.Context, id int64, input *UpdateAccountInput) (*Account, error) {
+	if err := s.rejectOpenCodeSystemAccountMutation(ctx, id); err != nil {
+		return nil, err
+	}
 	account, err := s.accountRepo.GetByID(ctx, id)
 	if err != nil {
 		return nil, err
@@ -967,6 +990,9 @@ func (s *adminServiceImpl) checkOpenCodeMixedChannelRisk(ctx context.Context, cu
 // UpdateAccountExtra 仅对 Extra JSONB 做 key 级合并，避免覆盖其它运行态键
 // （如 model_rate_limits / passive_usage_* 等）。
 func (s *adminServiceImpl) UpdateAccountExtra(ctx context.Context, id int64, updates map[string]any) error {
+	if err := s.rejectOpenCodeSystemAccountMutation(ctx, id); err != nil {
+		return err
+	}
 	delete(updates, UpstreamBillingProbeEnabledExtraKey)
 	delete(updates, UpstreamBillingRateSyncEnabledExtraKey)
 	delete(updates, UpstreamBillingProbeExtraKey)
@@ -1015,6 +1041,11 @@ func (s *adminServiceImpl) BulkUpdateAccounts(ctx context.Context, input *BulkUp
 
 	if len(input.AccountIDs) == 0 {
 		return result, nil
+	}
+	for _, accountID := range input.AccountIDs {
+		if err := s.rejectOpenCodeSystemAccountMutation(ctx, accountID); err != nil {
+			return nil, err
+		}
 	}
 	if input.GroupIDs != nil {
 		if err := s.validateGroupIDsExist(ctx, *input.GroupIDs); err != nil {
@@ -1306,6 +1337,9 @@ func (s *adminServiceImpl) resolveBulkUpdateTargetIDs(ctx context.Context, filte
 }
 
 func (s *adminServiceImpl) DeleteAccount(ctx context.Context, id int64) error {
+	if err := s.rejectOpenCodeSystemAccountMutation(ctx, id); err != nil {
+		return err
+	}
 	// 级联删除 spark 影子账号（先删影子，再删母账号）
 	shadows, err := s.accountRepo.ListShadowsByParent(ctx, id)
 	if err != nil {
@@ -1331,6 +1365,9 @@ func (s *adminServiceImpl) DeleteAccount(ctx context.Context, id int64) error {
 }
 
 func (s *adminServiceImpl) RefreshAccountCredentials(ctx context.Context, id int64) (*Account, error) {
+	if err := s.rejectOpenCodeSystemAccountMutation(ctx, id); err != nil {
+		return nil, err
+	}
 	account, err := s.accountRepo.GetByID(ctx, id)
 	if err != nil {
 		return nil, err
@@ -1340,6 +1377,9 @@ func (s *adminServiceImpl) RefreshAccountCredentials(ctx context.Context, id int
 }
 
 func (s *adminServiceImpl) ClearAccountError(ctx context.Context, id int64) (*Account, error) {
+	if err := s.rejectOpenCodeSystemAccountMutation(ctx, id); err != nil {
+		return nil, err
+	}
 	if err := s.accountRepo.ClearError(ctx, id); err != nil {
 		return nil, err
 	}
@@ -1362,10 +1402,16 @@ func (s *adminServiceImpl) ClearAccountError(ctx context.Context, id int64) (*Ac
 }
 
 func (s *adminServiceImpl) SetAccountError(ctx context.Context, id int64, errorMsg string) error {
+	if err := s.rejectOpenCodeSystemAccountMutation(ctx, id); err != nil {
+		return err
+	}
 	return s.accountRepo.SetError(ctx, id, errorMsg)
 }
 
 func (s *adminServiceImpl) SetAccountSchedulable(ctx context.Context, id int64, schedulable bool) (*Account, error) {
+	if err := s.rejectOpenCodeSystemAccountMutation(ctx, id); err != nil {
+		return nil, err
+	}
 	if schedulable && s.openCodeProxyPool != nil {
 		account, err := s.accountRepo.GetByID(ctx, id)
 		if err != nil {
@@ -1393,6 +1439,9 @@ func (s *adminServiceImpl) SetAccountSchedulable(ctx context.Context, id int64, 
 }
 
 func (s *adminServiceImpl) RevertAccountProxyFallback(ctx context.Context, id int64) error {
+	if err := s.rejectOpenCodeSystemAccountMutation(ctx, id); err != nil {
+		return err
+	}
 	if err := s.accountRepo.RevertProxyFallback(ctx, id); err != nil {
 		return err
 	}
@@ -1407,6 +1456,9 @@ func (s *adminServiceImpl) RevertAccountProxyFallback(ctx context.Context, id in
 // CreateShadow 为指定 OpenAI OAuth 母账号创建 spark 维度影子账号（一母一影）。
 // 安全不变量：Credentials 恒不含 auth token（仅 model_mapping，守卫 isAllowedSparkShadowCredentialsUpdate 放行）。
 func (s *adminServiceImpl) CreateShadow(ctx context.Context, parentID int64, opts ShadowOptions) (*Account, error) {
+	if err := s.rejectOpenCodeSystemAccountMutation(ctx, parentID); err != nil {
+		return nil, err
+	}
 	// 1. 加载母账号并校验平台/类型
 	parent, err := s.accountRepo.GetByID(ctx, parentID)
 	if err != nil {
@@ -1617,11 +1669,17 @@ func (s *adminServiceImpl) validateGroupIDsExist(ctx context.Context, groupIDs [
 			if groupID <= 0 || !existsByID[groupID] {
 				return fmt.Errorf("get group: %w", ErrGroupNotFound)
 			}
+			if err := s.rejectOpenCodeSystemGroupMutation(ctx, groupID); err != nil {
+				return err
+			}
 		}
 		return nil
 	}
 
 	for _, groupID := range groupIDs {
+		if err := s.rejectOpenCodeSystemGroupMutation(ctx, groupID); err != nil {
+			return err
+		}
 		if _, err := s.groupRepo.GetByID(ctx, groupID); err != nil {
 			return fmt.Errorf("get group: %w", err)
 		}
@@ -1660,6 +1718,9 @@ func (e *MixedChannelError) Error() string {
 }
 
 func (s *adminServiceImpl) ResetAccountQuota(ctx context.Context, id int64) error {
+	if err := s.rejectOpenCodeSystemAccountMutation(ctx, id); err != nil {
+		return err
+	}
 	account, err := s.accountRepo.GetByID(ctx, id)
 	if err != nil {
 		return err

@@ -1,5 +1,92 @@
 <template>
   <div class="flex min-h-0 flex-1 flex-col">
+    <section v-if="pool" class="border-b border-gray-200 bg-gray-50/70 p-4 dark:border-dark-700 dark:bg-dark-800/40">
+      <div class="grid gap-3 sm:grid-cols-2 xl:grid-cols-6">
+        <div class="rounded-xl border border-gray-200 bg-white p-3 dark:border-dark-600 dark:bg-dark-900">
+          <div class="text-xs text-gray-500 dark:text-gray-400">{{ t('admin.proxies.openCode.poolStatus') }}</div>
+          <div class="mt-1 flex items-center gap-2">
+            <span class="badge" :class="pool.enabled ? 'badge-success' : 'badge-gray'">
+              {{ pool.enabled ? t('admin.accounts.status.active') : t('admin.accounts.status.inactive') }}
+            </span>
+            <span class="text-xs text-gray-500">{{ pool.reconcile_status }}</span>
+          </div>
+        </div>
+        <div class="rounded-xl border border-gray-200 bg-white p-3 dark:border-dark-600 dark:bg-dark-900">
+          <div class="text-xs text-gray-500 dark:text-gray-400">{{ t('admin.proxies.openCode.activeWorkers') }}</div>
+          <div class="mt-1 text-xl font-semibold text-gray-900 dark:text-white">{{ pool.active_workers }}</div>
+        </div>
+        <div class="rounded-xl border border-gray-200 bg-white p-3 dark:border-dark-600 dark:bg-dark-900">
+          <div class="text-xs text-gray-500 dark:text-gray-400">{{ t('admin.proxies.openCode.healthy') }}</div>
+          <div class="mt-1 text-xl font-semibold text-emerald-600">{{ pool.healthy_nodes }}</div>
+        </div>
+        <div class="rounded-xl border border-gray-200 bg-white p-3 dark:border-dark-600 dark:bg-dark-900">
+          <div class="text-xs text-gray-500 dark:text-gray-400">
+            429 / {{ t('admin.proxies.openCode.duplicateExit') }} / {{ t('admin.proxies.openCode.transportError') }}
+          </div>
+          <div class="mt-1 text-xl font-semibold text-amber-600">
+            {{ pool.rate_limited_nodes }} / {{ pool.duplicate_nodes }} / {{ pool.failed_nodes }}
+          </div>
+        </div>
+        <div class="rounded-xl border border-gray-200 bg-white p-3 dark:border-dark-600 dark:bg-dark-900">
+          <div class="text-xs text-gray-500 dark:text-gray-400">{{ t('admin.proxies.openCode.upstreamKey') }}</div>
+          <div class="mt-1 text-sm font-medium text-gray-900 dark:text-white">
+            {{ pool.upstream_key_configured ? t('admin.proxies.openCode.keyConfigured') : t('admin.proxies.openCode.keyless') }}
+          </div>
+        </div>
+        <div class="rounded-xl border border-gray-200 bg-white p-3 dark:border-dark-600 dark:bg-dark-900">
+          <div class="text-xs text-gray-500 dark:text-gray-400">{{ t('admin.proxies.openCode.serverDirect') }}</div>
+          <div class="mt-1 text-sm font-medium text-gray-900 dark:text-white">
+            {{ pool.include_server_direct ? (pool.server_direct_status || t('admin.proxies.openCode.pending')) : t('admin.proxies.openCode.disabled') }}
+          </div>
+        </div>
+      </div>
+
+      <form class="mt-3 grid items-end gap-3 lg:grid-cols-[auto_auto_9rem_minmax(14rem,1fr)_auto_auto]" autocomplete="off" data-form-type="other" @submit.prevent="savePool">
+        <label class="flex min-h-11 items-center gap-2 text-sm text-gray-700 dark:text-gray-200">
+          <input v-model="poolForm.enabled" type="checkbox" class="h-4 w-4 rounded border-gray-300 text-primary-600" />
+          {{ t('admin.proxies.openCode.enablePool') }}
+        </label>
+        <label class="flex min-h-11 items-center gap-2 text-sm text-gray-700 dark:text-gray-200">
+          <input v-model="poolForm.include_server_direct" type="checkbox" class="h-4 w-4 rounded border-gray-300 text-primary-600" />
+          {{ t('admin.proxies.openCode.includeServerDirect') }}
+        </label>
+        <div>
+          <label class="input-label" for="opencode-worker-concurrency">{{ t('admin.proxies.openCode.workerConcurrency') }}</label>
+          <input id="opencode-worker-concurrency" v-model.number="poolForm.worker_concurrency" class="input" type="number" min="1" max="100" />
+        </div>
+        <div>
+          <label class="input-label" for="opencode-upstream-key">{{ t('admin.proxies.openCode.upstreamKeyOptional') }}</label>
+          <input
+            id="opencode-upstream-key"
+            v-model="poolForm.upstream_api_key"
+            class="input font-mono"
+            type="password"
+            name="opencode-pool-upstream-secret"
+            autocomplete="new-password"
+            data-1p-ignore
+            data-lpignore="true"
+            data-bwignore="true"
+            :disabled="poolForm.clear_upstream_api_key"
+            :placeholder="pool.upstream_key_configured ? t('admin.proxies.openCode.keepUpstreamKey') : t('admin.proxies.openCode.keylessPlaceholder')"
+          />
+        </div>
+        <label class="flex min-h-11 items-center gap-2 text-sm text-gray-700 dark:text-gray-200">
+          <input v-model="poolForm.clear_upstream_api_key" type="checkbox" class="h-4 w-4 rounded border-gray-300 text-primary-600" />
+          {{ t('admin.proxies.openCode.clearUpstreamKey') }}
+        </label>
+        <div class="flex gap-2">
+          <button class="btn btn-secondary" type="button" :disabled="reconciling" @click="reconcilePool">
+            <Icon name="refresh" size="sm" :class="reconciling ? 'animate-spin' : ''" class="mr-1" />
+            {{ t('admin.proxies.openCode.reconcile') }}
+          </button>
+          <button class="btn btn-primary" type="submit" :disabled="savingPool">
+            {{ t('common.save') }}
+          </button>
+        </div>
+      </form>
+      <p v-if="pool.reconcile_error" class="mt-2 text-xs text-red-600" role="alert">{{ pool.reconcile_error }}</p>
+    </section>
+
     <div class="flex flex-wrap items-center gap-2 border-b border-gray-200 px-4 py-3 dark:border-dark-700">
       <template v-if="view === 'subscriptions'">
         <button class="btn btn-secondary" :disabled="loading" :title="t('common.refresh')" @click="loadAll">
@@ -141,6 +228,7 @@
             <th class="px-4 py-3">{{ t('admin.proxies.columns.latency') }}</th>
             <th class="px-4 py-3">HTTP</th>
             <th class="px-4 py-3">{{ t('admin.proxies.columns.status') }}</th>
+            <th class="px-4 py-3">{{ t('admin.proxies.openCode.worker') }}</th>
             <th class="px-4 py-3">
               {{ t('admin.proxies.openCode.lastProbe') }}
             </th>
@@ -173,6 +261,15 @@
               <span class="badge" :class="healthClass(node.health_status)" :title="node.failure_message || undefined">
                 {{ healthLabel(node.health_status) }}
               </span>
+            </td>
+            <td class="px-4 py-3">
+              <template v-if="workerByNodeId.get(node.id)">
+                <span class="badge" :class="workerClass(workerByNodeId.get(node.id)!.status)">
+                  {{ workerLabel(workerByNodeId.get(node.id)!.status) }}
+                </span>
+                <div class="mt-1 font-mono text-xs text-gray-400">#{{ workerByNodeId.get(node.id)!.account_id }}</div>
+              </template>
+              <span v-else class="text-xs text-gray-400">-</span>
             </td>
             <td class="px-4 py-3 text-xs text-gray-500">
               {{ displayTime(node.last_probe_at) }}
@@ -251,7 +348,13 @@
 import { computed, onMounted, reactive, ref, watch } from 'vue'
 import { useI18n } from 'vue-i18n'
 import { adminAPI } from '@/api/admin'
-import type { ManagedProxyNode, OpenCodeModelRegistryStatus, ProxySubscription } from '@/api/admin/proxies'
+import type {
+  ManagedProxyNode,
+  OpenCodeModelRegistryStatus,
+  OpenCodePool,
+  OpenCodePoolWorker,
+  ProxySubscription
+} from '@/api/admin/proxies'
 import { useAppStore } from '@/stores/app'
 import BaseDialog from '@/components/common/BaseDialog.vue'
 import Icon from '@/components/icons/Icon.vue'
@@ -262,6 +365,8 @@ const appStore = useAppStore()
 const subscriptions = ref<ProxySubscription[]>([])
 const nodes = ref<ManagedProxyNode[]>([])
 const modelStatus = ref<OpenCodeModelRegistryStatus | null>(null)
+const pool = ref<OpenCodePool | null>(null)
+const workers = ref<OpenCodePoolWorker[]>([])
 const loading = ref(false)
 const probing = ref(false)
 const refreshingModels = ref(false)
@@ -270,11 +375,20 @@ const healthFilter = ref('')
 const showDialog = ref(false)
 const editing = ref<ProxySubscription | null>(null)
 const saving = ref(false)
+const savingPool = ref(false)
+const reconciling = ref(false)
 const form = reactive({
   name: '',
   url: '',
   enabled: true,
   sync_interval_minutes: 360
+})
+const poolForm = reactive({
+  enabled: true,
+  include_server_direct: true,
+  worker_concurrency: 1,
+  upstream_api_key: '',
+  clear_upstream_api_key: false
 })
 
 const errorMessage = (error: unknown) =>
@@ -282,6 +396,13 @@ const errorMessage = (error: unknown) =>
 const filteredNodes = computed(() =>
   healthFilter.value ? nodes.value.filter((node) => node.health_status === healthFilter.value) : nodes.value
 )
+const workerByNodeId = computed(() => {
+  const mapped = new Map<number, OpenCodePoolWorker>()
+  for (const worker of workers.value) {
+    if (worker.managed_node_id) mapped.set(worker.managed_node_id, worker)
+  }
+  return mapped
+})
 const displayTime = (value?: string | null) => (value ? new Date(value).toLocaleString() : '-')
 const healthClass = (status: string) =>
   status === 'healthy'
@@ -300,11 +421,33 @@ const healthLabel = (status: string) =>
     unprobed: t('admin.proxies.openCode.unprobed'),
     missing: t('admin.proxies.openCode.missing')
   })[status] || status
+const workerClass = (status: string) =>
+  status === 'active' ? 'badge-success' : status === 'cooling' ? 'badge-warning' : 'badge-gray'
+const workerLabel = (status: string) =>
+  ({
+    active: t('admin.proxies.openCode.workerActive'),
+    cooling: t('admin.proxies.openCode.workerCooling'),
+    inactive: t('admin.proxies.openCode.workerInactive')
+  })[status] || status
 
 async function loadAll() {
   loading.value = true
   try {
-    subscriptions.value = await adminAPI.proxies.listSubscriptions()
+    const [subscriptionItems, poolStatus, poolWorkers] = await Promise.all([
+      adminAPI.proxies.listSubscriptions(),
+      adminAPI.proxies.getOpenCodePool(),
+      adminAPI.proxies.listOpenCodePoolWorkers()
+    ])
+    subscriptions.value = subscriptionItems
+    pool.value = poolStatus
+    workers.value = poolWorkers
+    Object.assign(poolForm, {
+      enabled: poolStatus.enabled,
+      include_server_direct: poolStatus.include_server_direct,
+      worker_concurrency: poolStatus.worker_concurrency,
+      upstream_api_key: '',
+      clear_upstream_api_key: false
+    })
     if (props.view === 'nodes') {
       const batches = await Promise.all(
         subscriptions.value.map((item) => adminAPI.proxies.listSubscriptionNodes(item.id))
@@ -317,6 +460,39 @@ async function loadAll() {
     appStore.showError(errorMessage(error))
   } finally {
     loading.value = false
+  }
+}
+
+async function savePool() {
+  savingPool.value = true
+  try {
+    const upstreamKey = poolForm.upstream_api_key.trim()
+    pool.value = await adminAPI.proxies.updateOpenCodePool({
+      enabled: poolForm.enabled,
+      include_server_direct: poolForm.include_server_direct,
+      worker_concurrency: poolForm.worker_concurrency,
+      upstream_api_key: !poolForm.clear_upstream_api_key && upstreamKey ? upstreamKey : undefined,
+      clear_upstream_api_key: poolForm.clear_upstream_api_key
+    })
+    appStore.showSuccess(t('common.saved'))
+    await loadAll()
+  } catch (error) {
+    appStore.showError(errorMessage(error))
+  } finally {
+    savingPool.value = false
+  }
+}
+
+async function reconcilePool() {
+  reconciling.value = true
+  try {
+    workers.value = await adminAPI.proxies.reconcileOpenCodePool()
+    appStore.showSuccess(t('admin.proxies.openCode.reconcileSuccess'))
+    await loadAll()
+  } catch (error) {
+    appStore.showError(errorMessage(error))
+  } finally {
+    reconciling.value = false
   }
 }
 

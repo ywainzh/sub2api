@@ -44,6 +44,7 @@ type OpenAIGatewayHandler struct {
 	imageLimiter               *imageConcurrencyLimiter
 	maxAccountSwitches         int
 	cfg                        *config.Config
+	openCodeProxyPool          *service.OpenCodeProxyPoolService
 }
 
 type openAIWSTurnChannelMappingSnapshot struct {
@@ -1737,6 +1738,10 @@ func (h *OpenAIGatewayHandler) ResponsesWebSocket(c *gin.Context) {
 	}
 	if reqModel == "" {
 		closeOpenAIClientWS(wsConn, coderws.StatusPolicyViolation, "model is required in first response.create payload")
+		return
+	}
+	if h.openCodeProxyPool != nil && apiKey.OpenCodePoolID != nil && h.openCodeProxyPool.IsFreeModel(reqModel) {
+		closeOpenAIClientWS(wsConn, coderws.StatusPolicyViolation, "OpenCode models do not support Responses WebSocket; use the HTTP Responses endpoint")
 		return
 	}
 	ensureCompositeTargetPlatform(c, apiKey, reqModel)

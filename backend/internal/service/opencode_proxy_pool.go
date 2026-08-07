@@ -46,6 +46,8 @@ var (
 	ErrOpenCodeDuplicateExitIP   = infraerrors.Conflict("OPENCODE_DUPLICATE_EXIT_IP", "OpenCode exit IP is already leased")
 	ErrOpenCodeProxyRequired     = infraerrors.BadRequest("OPENCODE_PROXY_REQUIRED", "OpenCode proxy egress requires a managed proxy")
 	ErrOpenCodeProxyUnhealthy    = infraerrors.Conflict("OPENCODE_PROXY_UNHEALTHY", "OpenCode managed proxy is not healthy")
+	ErrOpenCodePoolUnavailable   = infraerrors.New(http.StatusServiceUnavailable, "OPENCODE_POOL_UNAVAILABLE", "OpenCode worker pool has no available workers")
+	ErrOpenCodeSystemResource    = infraerrors.Conflict("OPENCODE_SYSTEM_RESOURCE", "OpenCode system-managed resources are read-only")
 	openCodeGeoBaseURL           = "http://ip-api.com/json/"
 )
 
@@ -120,6 +122,62 @@ type OpenCodeModelRegistryStatus struct {
 	UsingBaseline bool       `json:"using_baseline"`
 }
 
+type OpenCodePool struct {
+	ID                    int64      `json:"id"`
+	Name                  string     `json:"name"`
+	GroupID               int64      `json:"group_id"`
+	Enabled               bool       `json:"enabled"`
+	UpstreamKeyConfigured bool       `json:"upstream_key_configured"`
+	IncludeServerDirect   bool       `json:"include_server_direct"`
+	WorkerConcurrency     int        `json:"worker_concurrency"`
+	ReconcileStatus       string     `json:"reconcile_status"`
+	ReconcileError        string     `json:"reconcile_error,omitempty"`
+	LastReconciledAt      *time.Time `json:"last_reconciled_at"`
+	ActiveWorkers         int        `json:"active_workers"`
+	HealthyNodes          int        `json:"healthy_nodes"`
+	RateLimitedNodes      int        `json:"rate_limited_nodes"`
+	DuplicateNodes        int        `json:"duplicate_nodes"`
+	FailedNodes           int        `json:"failed_nodes"`
+	ServerDirectStatus    string     `json:"server_direct_status,omitempty"`
+	CreatedAt             time.Time  `json:"created_at"`
+	UpdatedAt             time.Time  `json:"updated_at"`
+	UpstreamKeyCiphertext string     `json:"-"`
+	Group                 *Group     `json:"-"`
+}
+
+type OpenCodePoolWorker struct {
+	ID                 int64      `json:"id"`
+	PoolID             int64      `json:"pool_id"`
+	ManagedNodeID      *int64     `json:"managed_node_id"`
+	AccountID          int64      `json:"account_id"`
+	ProxyID            *int64     `json:"proxy_id"`
+	DisplayName        string     `json:"display_name"`
+	EgressMode         string     `json:"egress_mode"`
+	ExitIP             string     `json:"exit_ip,omitempty"`
+	Status             string     `json:"status"`
+	ErrorReason        string     `json:"error_reason,omitempty"`
+	HealthStatus       string     `json:"health_status,omitempty"`
+	OpenCodeHTTPStatus *int       `json:"opencode_http_status"`
+	LastProbeAt        *time.Time `json:"last_probe_at"`
+	RateLimitResetAt   *time.Time `json:"rate_limit_reset_at"`
+	CreatedAt          time.Time  `json:"created_at"`
+	UpdatedAt          time.Time  `json:"updated_at"`
+}
+
+type OpenCodePoolUpdate struct {
+	Enabled             *bool
+	IncludeServerDirect *bool
+	WorkerConcurrency   *int
+	UpstreamAPIKey      *string
+	ClearUpstreamAPIKey bool
+}
+
+type OpenCodePoolBindingMutation struct {
+	APIKeyID int64
+	PoolID   int64
+	UserID   int64
+}
+
 type OpenCodeProxyPoolRepository interface {
 	ListSubscriptions(context.Context) ([]ProxySubscription, error)
 	GetSubscription(context.Context, int64) (*ProxySubscription, error)
@@ -135,26 +193,40 @@ type OpenCodeProxyPoolRepository interface {
 	IsManagedProxy(context.Context, int64) (bool, error)
 	AcquireEgressLease(context.Context, int64, *int64, string, string, time.Time) error
 	ReleaseEgressLease(context.Context, int64) error
+	EnsureDefaultPool(context.Context) (*OpenCodePool, error)
+	GetOpenCodePool(context.Context) (*OpenCodePool, error)
+	UpdateOpenCodePool(context.Context, OpenCodePool) (*OpenCodePool, error)
+	ListOpenCodePoolWorkers(context.Context, int64) ([]OpenCodePoolWorker, error)
+	ReconcileOpenCodePoolWorkers(context.Context, OpenCodePool, string, *OpenCodeNodeProbeResult) ([]OpenCodePoolWorker, error)
+	BindAPIKeyToOpenCodePool(context.Context, int64, int64, *int64) (*OpenCodePoolBindingMutation, error)
+	UnbindAPIKeyFromOpenCodePool(context.Context, int64) (*OpenCodePoolBindingMutation, error)
+	ListOpenCodeBoundUserIDs(context.Context, int64) ([]int64, error)
+	IsOpenCodeSystemWorkerAccount(context.Context, int64) (bool, error)
+	IsOpenCodeSystemGroup(context.Context, int64) (bool, error)
 }
 
 type OpenCodeProxyPoolService struct {
-	repo        OpenCodeProxyPoolRepository
-	encryptor   SecretEncryptor
-	settingRepo SettingRepository
-	accountRepo AccountRepository
-	httpClient  *http.Client
-	controller  string
-	secret      string
-	configDir   string
-	proxyHost   string
-	syncMu      sync.Mutex
-	modelMu     sync.RWMutex
-	modelStatus OpenCodeModelRegistryStatus
-	stop        chan struct{}
-	stopOnce    sync.Once
+	repo                 OpenCodeProxyPoolRepository
+	encryptor            SecretEncryptor
+	settingRepo          SettingRepository
+	accountRepo          AccountRepository
+	groupRepo            GroupRepository
+	authCacheInvalidator APIKeyAuthCacheInvalidator
+	httpClient           *http.Client
+	controller           string
+	secret               string
+	configDir            string
+	proxyHost            string
+	syncMu               sync.Mutex
+	modelMu              sync.RWMutex
+	modelStatus          OpenCodeModelRegistryStatus
+	poolMu               sync.RWMutex
+	poolStatus           *OpenCodePool
+	stop                 chan struct{}
+	stopOnce             sync.Once
 }
 
-func NewOpenCodeProxyPoolService(repo OpenCodeProxyPoolRepository, encryptor SecretEncryptor, settingRepo SettingRepository, accountRepo AccountRepository) *OpenCodeProxyPoolService {
+func NewOpenCodeProxyPoolService(repo OpenCodeProxyPoolRepository, encryptor SecretEncryptor, settingRepo SettingRepository, accountRepo AccountRepository, deps ...any) *OpenCodeProxyPoolService {
 	controller := strings.TrimRight(strings.TrimSpace(os.Getenv("OPENCODE_MIHOMO_CONTROLLER_URL")), "/")
 	if controller == "" {
 		controller = "http://opencode-mihomo:9090"
@@ -167,13 +239,22 @@ func NewOpenCodeProxyPoolService(repo OpenCodeProxyPoolRepository, encryptor Sec
 	if proxyHost == "" {
 		proxyHost = "opencode-mihomo"
 	}
-	return &OpenCodeProxyPoolService{
+	svc := &OpenCodeProxyPoolService{
 		repo: repo, encryptor: encryptor, settingRepo: settingRepo, accountRepo: accountRepo,
 		httpClient: &http.Client{Timeout: openCodeProbeTimeout},
 		controller: controller, secret: strings.TrimSpace(os.Getenv("OPENCODE_MIHOMO_SECRET")),
 		configDir: configDir, proxyHost: proxyHost, stop: make(chan struct{}),
 		modelStatus: OpenCodeModelRegistryStatus{IDs: defaultOpenCodeFreeModels.IDs(), Count: len(defaultOpenCodeFreeModels.IDs()), UsingBaseline: true},
 	}
+	for _, dep := range deps {
+		switch typed := dep.(type) {
+		case GroupRepository:
+			svc.groupRepo = typed
+		case APIKeyAuthCacheInvalidator:
+			svc.authCacheInvalidator = typed
+		}
+	}
+	return svc
 }
 
 func (s *OpenCodeProxyPoolService) Start() {
@@ -181,10 +262,17 @@ func (s *OpenCodeProxyPoolService) Start() {
 		return
 	}
 	go func() {
-		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
-		_ = s.LoadModelSnapshot(ctx)
-		_, _ = s.RefreshModels(ctx)
-		cancel()
+		bootstrapCtx, bootstrapCancel := context.WithTimeout(context.Background(), time.Minute)
+		_ = s.LoadModelSnapshot(bootstrapCtx)
+		if _, err := s.BootstrapPool(bootstrapCtx); err != nil {
+			slog.Warn("opencode_pool_bootstrap_failed", "error", err)
+		} else if _, err := s.ReconcileWorkers(bootstrapCtx); err != nil {
+			slog.Warn("opencode_pool_initial_reconcile_failed", "error", err)
+		}
+		bootstrapCancel()
+		refreshCtx, refreshCancel := context.WithTimeout(context.Background(), 30*time.Second)
+		_, _ = s.RefreshModels(refreshCtx)
+		refreshCancel()
 		modelTicker := time.NewTicker(6 * time.Hour)
 		probeTicker := time.NewTicker(15 * time.Minute)
 		syncTicker := time.NewTicker(time.Minute)
@@ -318,6 +406,9 @@ func (s *OpenCodeProxyPoolService) UpdateSubscription(ctx context.Context, id in
 		if err := s.reloadPersistedMihomo(ctx); err != nil {
 			return nil, err
 		}
+		if _, err := s.ReconcileWorkers(ctx); err != nil {
+			return nil, fmt.Errorf("reconcile OpenCode workers after subscription update: %w", err)
+		}
 	}
 	return updated, nil
 }
@@ -328,7 +419,11 @@ func (s *OpenCodeProxyPoolService) DeleteSubscription(ctx context.Context, id in
 	if err := s.repo.DeleteSubscription(ctx, id); err != nil {
 		return err
 	}
-	return s.reloadPersistedMihomo(ctx)
+	if err := s.reloadPersistedMihomo(ctx); err != nil {
+		return err
+	}
+	_, err := s.ReconcileWorkers(ctx)
+	return err
 }
 
 func (s *OpenCodeProxyPoolService) reloadPersistedMihomo(ctx context.Context) error {
@@ -893,15 +988,32 @@ func (s *OpenCodeProxyPoolService) ProbeNodes(ctx context.Context, ids []int64) 
 	for _, id := range ids {
 		selected[id] = struct{}{}
 	}
+	enabledSubscriptions := make(map[int64]struct{})
+	if len(selected) == 0 {
+		subscriptions, listErr := s.repo.ListSubscriptions(ctx)
+		if listErr != nil {
+			return nil, listErr
+		}
+		for _, subscription := range subscriptions {
+			if subscription.Enabled {
+				enabledSubscriptions[subscription.ID] = struct{}{}
+			}
+		}
+	}
 	results := make([]OpenCodeNodeProbeResult, 0, len(nodes))
 	sem := make(chan struct{}, 3)
 	var mu sync.Mutex
 	var wg sync.WaitGroup
 	for _, node := range nodes {
+		if node.SyncStatus != "active" {
+			continue
+		}
 		if len(selected) > 0 {
 			if _, ok := selected[node.ID]; !ok {
 				continue
 			}
+		} else if _, ok := enabledSubscriptions[node.SubscriptionID]; !ok {
+			continue
 		}
 		node := node
 		wg.Add(1)
@@ -971,6 +1083,9 @@ func (s *OpenCodeProxyPoolService) ProbeNodes(ctx context.Context, ids []int64) 
 				slog.Warn("opencode_duplicate_exit_disable_account_failed", "account_id", accountID, "error", err)
 			}
 		}
+	}
+	if _, err := s.ReconcileWorkers(ctx); err != nil {
+		return nil, fmt.Errorf("reconcile OpenCode workers after probe: %w", err)
 	}
 	return results, nil
 }
@@ -1263,6 +1378,9 @@ func (s *OpenCodeProxyPoolService) RefreshModels(ctx context.Context) (*OpenCode
 		if err := s.settingRepo.Set(ctx, OpenCodeModelSnapshotSettingKey, string(encoded)); err != nil {
 			slog.Warn("opencode_model_snapshot_persist_failed", "error", err)
 		}
+	}
+	if pool := s.cachedOpenCodePool(); pool != nil {
+		s.invalidateBoundAPIKeys(ctx, pool.ID)
 	}
 	return &status, nil
 }

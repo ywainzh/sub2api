@@ -688,6 +688,8 @@ export interface ApiKey {
   key: string
   name: string
   group_id: number | null
+  opencode_pool_id?: number | null
+  opencode_bound?: boolean
   status: 'active' | 'inactive' | 'quota_exhausted' | 'expired'
   ip_whitelist: string[]
   ip_blacklist: string[]

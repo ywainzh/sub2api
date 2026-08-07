@@ -876,8 +876,17 @@ func (r *accountRepository) List(ctx context.Context, params pagination.Paginati
 	return r.ListWithFilters(ctx, params, "", "", "", "", 0, "")
 }
 
-func (r *accountRepository) accountListFilteredQuery(platform, accountType, status, search string, groupID int64, privacyMode string) *dbent.AccountQuery {
+func (r *accountRepository) accountListFilteredQuery(platform, accountType, status, search string, groupID int64, privacyMode string, hideOpenCodeSystemWorkers bool) *dbent.AccountQuery {
 	q := r.client.Account.Query()
+	if hideOpenCodeSystemWorkers {
+		q = q.Where(dbpredicate.Account(func(s *entsql.Selector) {
+			path := sqljson.Path("system_worker")
+			s.Where(entsql.Or(
+				entsql.Not(sqljson.HasKey(dbaccount.FieldExtra, path)),
+				entsql.Not(sqljson.ValueEQ(dbaccount.FieldExtra, "opencode_pool", path)),
+			))
+		}))
+	}
 
 	if platform != "" {
 		q = q.Where(dbaccount.PlatformEQ(platform))
@@ -973,7 +982,15 @@ func (r *accountRepository) accountListFilteredQuery(platform, accountType, stat
 }
 
 func (r *accountRepository) ListWithFilters(ctx context.Context, params pagination.PaginationParams, platform, accountType, status, search string, groupID int64, privacyMode string) ([]service.Account, *pagination.PaginationResult, error) {
-	q := r.accountListFilteredQuery(platform, accountType, status, search, groupID, privacyMode)
+	return r.listWithFilters(ctx, params, platform, accountType, status, search, groupID, privacyMode, false)
+}
+
+func (r *accountRepository) ListAdminWithFilters(ctx context.Context, params pagination.PaginationParams, platform, accountType, status, search string, groupID int64, privacyMode string) ([]service.Account, *pagination.PaginationResult, error) {
+	return r.listWithFilters(ctx, params, platform, accountType, status, search, groupID, privacyMode, true)
+}
+
+func (r *accountRepository) listWithFilters(ctx context.Context, params pagination.PaginationParams, platform, accountType, status, search string, groupID int64, privacyMode string, hideOpenCodeSystemWorkers bool) ([]service.Account, *pagination.PaginationResult, error) {
+	q := r.accountListFilteredQuery(platform, accountType, status, search, groupID, privacyMode, hideOpenCodeSystemWorkers)
 	// Clone before Count so interceptor-appended predicates (SoftDeleteMixin's
 	// deleted_at IS NULL) don't accumulate on the shared builder and pollute the
 	// subsequent list query. Same pattern used in group_repo/promo_code_repo/user_repo
@@ -1003,7 +1020,15 @@ func (r *accountRepository) ListWithFilters(ctx context.Context, params paginati
 }
 
 func (r *accountRepository) ListAllWithFilters(ctx context.Context, platform, accountType, status, search string, groupID int64, privacyMode string) ([]service.Account, error) {
-	accounts, err := r.accountListFilteredQuery(platform, accountType, status, search, groupID, privacyMode).All(ctx)
+	return r.listAllWithFilters(ctx, platform, accountType, status, search, groupID, privacyMode, false)
+}
+
+func (r *accountRepository) ListAllAdminWithFilters(ctx context.Context, platform, accountType, status, search string, groupID int64, privacyMode string) ([]service.Account, error) {
+	return r.listAllWithFilters(ctx, platform, accountType, status, search, groupID, privacyMode, true)
+}
+
+func (r *accountRepository) listAllWithFilters(ctx context.Context, platform, accountType, status, search string, groupID int64, privacyMode string, hideOpenCodeSystemWorkers bool) ([]service.Account, error) {
+	accounts, err := r.accountListFilteredQuery(platform, accountType, status, search, groupID, privacyMode, hideOpenCodeSystemWorkers).All(ctx)
 	if err != nil {
 		return nil, err
 	}

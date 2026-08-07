@@ -1,0 +1,216 @@
+name: sub2api-opencode-test
+
+services:
+  sub2api:
+    image: ${TEST_APP_IMAGE:?TEST_APP_IMAGE must use a fixed release tag}
+    container_name: sub2api-opencode-test-app
+    restart: unless-stopped
+    init: true
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      opencode-mihomo:
+        condition: service_started
+      opencode-seed:
+        condition: service_healthy
+    ports:
+      - "127.0.0.1:${TEST_HOST_PORT:-39081}:8080"
+    volumes:
+      - ./test-data/app:/app/data
+      - ./test-data/opencode-mihomo:/app/data/opencode-mihomo
+    environment:
+      AUTO_SETUP: "true"
+      SERVER_HOST: 0.0.0.0
+      SERVER_PORT: "8080"
+      SERVER_MODE: release
+      RUN_MODE: standard
+      SUB2API_DEPLOYMENT_MODE: docker
+      SUB2API_DEPLOY_DIR: /opt/sub2api-test
+      DATABASE_HOST: postgres
+      DATABASE_PORT: "5432"
+      DATABASE_USER: ${TEST_POSTGRES_USER:-sub2api_test}
+      DATABASE_PASSWORD: ${TEST_POSTGRES_PASSWORD:?TEST_POSTGRES_PASSWORD is required}
+      DATABASE_DBNAME: ${TEST_POSTGRES_DB:-sub2api_test}
+      DATABASE_SSLMODE: disable
+      DATABASE_MAX_OPEN_CONNS: "10"
+      DATABASE_MAX_IDLE_CONNS: "2"
+      DATABASE_CONN_MAX_LIFETIME_MINUTES: "30"
+      DATABASE_CONN_MAX_IDLE_TIME_MINUTES: "5"
+      REDIS_HOST: redis
+      REDIS_PORT: "6379"
+      REDIS_PASSWORD: ${TEST_REDIS_PASSWORD:?TEST_REDIS_PASSWORD is required}
+      REDIS_DB: "0"
+      REDIS_POOL_SIZE: "12"
+      REDIS_MIN_IDLE_CONNS: "2"
+      REDIS_ENABLE_TLS: "false"
+      ADMIN_EMAIL: ${TEST_ADMIN_EMAIL:-admin-test@sub2api.local}
+      ADMIN_PASSWORD: ${TEST_ADMIN_PASSWORD:?TEST_ADMIN_PASSWORD is required}
+      JWT_SECRET: ${TEST_JWT_SECRET:?TEST_JWT_SECRET is required}
+      TOTP_ENCRYPTION_KEY: ${TEST_TOTP_ENCRYPTION_KEY:?TEST_TOTP_ENCRYPTION_KEY is required}
+      OPENCODE_MIHOMO_CONTROLLER_URL: http://opencode-mihomo:9090
+      OPENCODE_MIHOMO_CONFIG_DIR: /app/data/opencode-mihomo
+      OPENCODE_MIHOMO_PROXY_HOST: opencode-mihomo
+      OPENCODE_MIHOMO_SECRET: ${TEST_OPENCODE_MIHOMO_SECRET:?TEST_OPENCODE_MIHOMO_SECRET is required}
+      TZ: ${TZ:-Asia/Shanghai}
+    networks:
+      - opencode-test-network
+    healthcheck:
+      test: ["CMD", "curl", "-fsS", "http://127.0.0.1:8080/health"]
+      interval: 15s
+      timeout: 5s
+      retries: 10
+      start_period: 30s
+    logging:
+      driver: json-file
+      options:
+        max-size: 5m
+        max-file: "2"
+    mem_limit: 256m
+    cpus: 0.75
+    pids_limit: 192
+    security_opt:
+      - no-new-privileges:true
+
+  opencode-mihomo:
+    image: ${TEST_OPENCODE_MIHOMO_IMAGE:-metacubex/mihomo:v1.19.17}
+    container_name: sub2api-opencode-test-mihomo
+    restart: unless-stopped
+    init: true
+    command:
+      - -d
+      - /root/.config/mihomo
+      - -f
+      - /root/.config/mihomo/config.yaml
+      - -ext-ctl
+      - 0.0.0.0:9090
+      - -secret
+      - ${TEST_OPENCODE_MIHOMO_SECRET:?TEST_OPENCODE_MIHOMO_SECRET is required}
+    volumes:
+      - ./test-data/opencode-mihomo:/root/.config/mihomo
+    environment:
+      TZ: ${TZ:-Asia/Shanghai}
+    networks:
+      - opencode-test-network
+    logging:
+      driver: json-file
+      options:
+        max-size: 5m
+        max-file: "2"
+    mem_limit: 144m
+    cpus: 0.35
+    pids_limit: 96
+    security_opt:
+      - no-new-privileges:true
+
+  postgres:
+    image: ${TEST_POSTGRES_IMAGE:-postgres:18-alpine}
+    container_name: sub2api-opencode-test-postgres
+    restart: unless-stopped
+    command:
+      - postgres
+      - -c
+      - max_connections=20
+      - -c
+      - shared_buffers=16MB
+      - -c
+      - effective_cache_size=64MB
+      - -c
+      - maintenance_work_mem=8MB
+    volumes:
+      - ./test-data/postgres:/var/lib/postgresql/data
+    environment:
+      POSTGRES_USER: ${TEST_POSTGRES_USER:-sub2api_test}
+      POSTGRES_PASSWORD: ${TEST_POSTGRES_PASSWORD:?TEST_POSTGRES_PASSWORD is required}
+      POSTGRES_DB: ${TEST_POSTGRES_DB:-sub2api_test}
+      PGDATA: /var/lib/postgresql/data
+      TZ: ${TZ:-Asia/Shanghai}
+    networks:
+      - opencode-test-network
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U $${POSTGRES_USER} -d $${POSTGRES_DB}"]
+      interval: 5s
+      timeout: 3s
+      retries: 15
+      start_period: 10s
+    logging:
+      driver: json-file
+      options:
+        max-size: 5m
+        max-file: "2"
+    mem_limit: 144m
+    cpus: 0.35
+    pids_limit: 96
+    security_opt:
+      - no-new-privileges:true
+
+  redis:
+    image: ${TEST_REDIS_IMAGE:-redis:8-alpine}
+    container_name: sub2api-opencode-test-redis
+    restart: unless-stopped
+    command:
+      - redis-server
+      - --save
+      - "60"
+      - "1"
+      - --appendonly
+      - "yes"
+      - --appendfsync
+      - everysec
+      - --maxclients
+      - "64"
+      - --requirepass
+      - ${TEST_REDIS_PASSWORD:?TEST_REDIS_PASSWORD is required}
+    volumes:
+      - ./test-data/redis:/data
+    environment:
+      REDISCLI_AUTH: ${TEST_REDIS_PASSWORD:?TEST_REDIS_PASSWORD is required}
+      TZ: ${TZ:-Asia/Shanghai}
+    networks:
+      - opencode-test-network
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 15
+      start_period: 5s
+    logging:
+      driver: json-file
+      options:
+        max-size: 5m
+        max-file: "2"
+    mem_limit: 64m
+    cpus: 0.15
+    pids_limit: 64
+    security_opt:
+      - no-new-privileges:true
+
+  opencode-seed:
+    image: ${TEST_SEED_IMAGE:-nginx:1.27.5-alpine}
+    container_name: sub2api-opencode-test-seed
+    restart: unless-stopped
+    volumes:
+      - /opt/proxy-service/config.yaml:/usr/share/nginx/html/config.yaml:ro
+    networks:
+      - opencode-test-network
+    healthcheck:
+      test: ["CMD-SHELL", "wget -q -O /dev/null http://127.0.0.1/config.yaml"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+      start_period: 5s
+    logging:
+      driver: json-file
+      options:
+        max-size: 1m
+        max-file: "1"
+    mem_limit: 24m
+    cpus: 0.10
+    pids_limit: 32
+    security_opt:
+      - no-new-privileges:true
+
+networks:
+  opencode-test-network:
+    driver: bridge

@@ -538,6 +538,12 @@ export default {
       groupChangedSuccess: '分组修改成功',
       groupChangedWithGrant: '分组修改成功，已自动为用户添加「{group}」分组权限',
       groupChangeFailed: '分组修改失败',
+      appendOpenCode: '追加 OpenCode',
+      appendOpenCodeHint: '免费模型自动进入 OpenCode Worker 池，其他模型继续使用当前分组。',
+      openCodePoolHealthy: 'Worker 池可用（{count} 个）',
+      openCodePoolUnavailable: 'Worker 池当前不可用',
+      openCodeBindingUpdated: 'OpenCode 路由已更新',
+      openCodeBindingFailed: 'OpenCode 路由更新失败',
       noUsersYet: '暂无用户',
       createFirstUser: '创建您的第一个用户以开始使用系统',
       userCreated: '用户创建成功',
@@ -766,6 +772,7 @@ export default {
 
     // Groups Management
     groups: {
+      systemManaged: '系统托管（只读）',
       title: '分组管理',
       description: '管理 API 密钥分组和费率配置',
       searchGroups: '搜索分组...',

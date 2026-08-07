@@ -649,6 +649,34 @@ type adminServiceImpl struct {
 	openCodeProxyPool    *OpenCodeProxyPoolService
 }
 
+func (s *adminServiceImpl) rejectOpenCodeSystemAccountMutation(ctx context.Context, accountID int64) error {
+	if s == nil || s.openCodeProxyPool == nil || accountID <= 0 {
+		return nil
+	}
+	managed, err := s.openCodeProxyPool.IsSystemWorkerAccount(ctx, accountID)
+	if err != nil {
+		return err
+	}
+	if managed {
+		return ErrOpenCodeSystemResource
+	}
+	return nil
+}
+
+func (s *adminServiceImpl) rejectOpenCodeSystemGroupMutation(ctx context.Context, groupID int64) error {
+	if s == nil || s.openCodeProxyPool == nil || groupID <= 0 {
+		return nil
+	}
+	managed, err := s.openCodeProxyPool.IsSystemGroup(ctx, groupID)
+	if err != nil {
+		return err
+	}
+	if managed {
+		return ErrOpenCodeSystemResource
+	}
+	return nil
+}
+
 type adminRechargeAffiliateAccruer interface {
 	AccrueInviteRebate(ctx context.Context, inviteeUserID int64, baseRechargeAmount float64) (float64, error)
 }

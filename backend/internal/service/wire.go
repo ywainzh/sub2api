@@ -912,8 +912,10 @@ func ProvideOpenCodeProxyPoolService(
 	encryptor SecretEncryptor,
 	settingRepo SettingRepository,
 	accountRepo AccountRepository,
+	groupRepo GroupRepository,
+	authCacheInvalidator APIKeyAuthCacheInvalidator,
 ) *OpenCodeProxyPoolService {
-	svc := NewOpenCodeProxyPoolService(repo, encryptor, settingRepo, accountRepo)
+	svc := NewOpenCodeProxyPoolService(repo, encryptor, settingRepo, accountRepo, groupRepo, authCacheInvalidator)
 	svc.Start()
 	return svc
 }
