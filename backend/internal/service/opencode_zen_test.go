@@ -10,6 +10,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/Wei-Shaw/sub2api/internal/pkg/apicompat"
 	"github.com/gin-gonic/gin"
 	"github.com/stretchr/testify/require"
 )
@@ -46,6 +47,51 @@ func TestTransformOpenCodeZenChatBody(t *testing.T) {
 	firstMessage, ok := messages[0].(map[string]any)
 	require.True(t, ok)
 	require.Equal(t, " ", firstMessage["reasoning_content"])
+}
+
+func TestTransformOpenCodeZenResponsesStringInput(t *testing.T) {
+	normalized, changed, err := normalizeOpenCodeResponsesStringInput([]byte(`{"model":"deepseek-v4-flash-free","input":"Reply exactly OK","stream":false,"max_output_tokens":32}`))
+	require.NoError(t, err)
+	require.True(t, changed)
+
+	var responsesReq apicompat.ResponsesRequest
+	require.NoError(t, json.Unmarshal(normalized, &responsesReq))
+
+	chatReq, err := apicompat.ResponsesToChatCompletionsRequest(&responsesReq)
+	require.NoError(t, err)
+	chatBody, err := json.Marshal(chatReq)
+	require.NoError(t, err)
+	chatBody, err = transformOpenCodeZenChatBody(chatBody, responsesReq.Model, responsesReq.Stream)
+	require.NoError(t, err)
+
+	var payload struct {
+		Messages []struct {
+			Role    string `json:"role"`
+			Content string `json:"content"`
+		} `json:"messages"`
+	}
+	require.NoError(t, json.Unmarshal(chatBody, &payload))
+	require.Len(t, payload.Messages, 1)
+	require.Equal(t, "user", payload.Messages[0].Role)
+	require.Equal(t, "Reply exactly OK", payload.Messages[0].Content)
+
+	var arrayReq apicompat.ResponsesRequest
+	require.NoError(t, json.Unmarshal([]byte(`{"model":"deepseek-v4-flash-free","input":[{"role":"user","content":"Reply exactly OK"}],"stream":false,"max_output_tokens":32}`), &arrayReq))
+	arrayChatReq, err := apicompat.ResponsesToChatCompletionsRequest(&arrayReq)
+	require.NoError(t, err)
+	arrayChatBody, err := json.Marshal(arrayChatReq)
+	require.NoError(t, err)
+	arrayChatBody, err = transformOpenCodeZenChatBody(arrayChatBody, arrayReq.Model, arrayReq.Stream)
+	require.NoError(t, err)
+	require.JSONEq(t, string(arrayChatBody), string(chatBody))
+}
+
+func TestNormalizeOpenCodeResponsesStringInputLeavesArrayUnchanged(t *testing.T) {
+	body := []byte(`{"model":"deepseek-v4-flash-free","input":[{"role":"user","content":"Reply exactly OK"}]}`)
+	normalized, changed, err := normalizeOpenCodeResponsesStringInput(body)
+	require.NoError(t, err)
+	require.False(t, changed)
+	require.Equal(t, body, normalized)
 }
 
 func TestTransformOpenCodeZenChatBodyRejectsUnknownModel(t *testing.T) {

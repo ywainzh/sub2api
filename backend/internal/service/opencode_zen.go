@@ -164,6 +164,34 @@ func transformOpenCodeZenChatBody(body []byte, model string, stream bool) ([]byt
 	return json.Marshal(payload)
 }
 
+func normalizeOpenCodeResponsesStringInput(body []byte) ([]byte, bool, error) {
+	var payload map[string]json.RawMessage
+	if err := json.Unmarshal(body, &payload); err != nil {
+		return body, false, err
+	}
+	inputRaw, exists := payload["input"]
+	if !exists {
+		return body, false, nil
+	}
+	var inputText string
+	if err := json.Unmarshal(inputRaw, &inputText); err != nil {
+		return body, false, nil
+	}
+	normalizedInput, err := json.Marshal([]map[string]any{{
+		"role":    "user",
+		"content": inputText,
+	}})
+	if err != nil {
+		return body, false, err
+	}
+	payload["input"] = normalizedInput
+	normalizedBody, err := json.Marshal(payload)
+	if err != nil {
+		return body, false, err
+	}
+	return normalizedBody, true, nil
+}
+
 func applyOpenCodeZenHeaders(headers http.Header, clientHeaders http.Header) {
 	for _, key := range []string{"x-opencode-session", "x-opencode-request", "x-opencode-project", "x-opencode-client", "x-session-id", "x-title"} {
 		for clientKey, values := range clientHeaders {

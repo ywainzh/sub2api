@@ -25,6 +25,16 @@ func (s *OpenAIGatewayService) forwardResponsesViaRawChatCompletions(
 	body []byte,
 ) (*OpenAIForwardResult, error) {
 	startTime := time.Now()
+	if account.IsOpenCodeZen() {
+		normalizedBody, changed, err := normalizeOpenCodeResponsesStringInput(body)
+		if err != nil {
+			writeOpenAIResponsesFallbackError(c, http.StatusBadRequest, "invalid_request_error", "Failed to parse request body")
+			return nil, fmt.Errorf("normalize OpenCode Responses input: %w", err)
+		}
+		if changed {
+			body = normalizedBody
+		}
+	}
 
 	var responsesReq apicompat.ResponsesRequest
 	if err := json.Unmarshal(body, &responsesReq); err != nil {
