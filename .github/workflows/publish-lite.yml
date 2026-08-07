@@ -189,6 +189,7 @@ jobs:
           JWT_SECRET: 0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef
           TOTP_ENCRYPTION_KEY: 0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef
           ADMIN_PASSWORD: ci-admin-password
+          OPENCODE_MIHOMO_SECRET: 0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef
         run: docker compose -f deploy/lite/docker-compose.yml config --quiet
 
       - name: Log in to GHCR
