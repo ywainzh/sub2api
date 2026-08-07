@@ -22,6 +22,15 @@ func (s *OpenAIGatewayService) Forward(ctx context.Context, c *gin.Context, acco
 	clearGrokResponsesClientToolMapping(c)
 	clearOpenAIResponsesNamespaceNames(c)
 	startTime := time.Now()
+	if account.IsOpenCodeZen() {
+		normalizedBody, changed, err := normalizeOpenCodeResponsesStringInput(body)
+		if err != nil {
+			return nil, fmt.Errorf("normalize OpenCode Responses input: %w", err)
+		}
+		if changed {
+			body = normalizedBody
+		}
+	}
 	// 固定渠道映射后的请求级 canonical body；账号 normalize/strip 不得改写跨 failover hint。
 	canonicalImageIntentBody := body
 
