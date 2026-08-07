@@ -356,6 +356,9 @@ async function saveSubscription() {
         enabled: form.enabled,
         sync_interval_minutes: form.sync_interval_minutes
       })
+      closeDialog()
+      appStore.showSuccess(t('common.saved'))
+      await loadAll()
     } else {
       const created = await adminAPI.proxies.createSubscription({
         name: form.name.trim(),
@@ -363,15 +366,38 @@ async function saveSubscription() {
         enabled: form.enabled,
         sync_interval_minutes: form.sync_interval_minutes
       })
-      if (created.enabled) await adminAPI.proxies.syncSubscription(created.id)
+      subscriptions.value = [...subscriptions.value, created]
+      closeDialog()
+      appStore.showSuccess(t('common.saved'))
+      if (created.enabled) {
+        void syncCreatedSubscription(created.id)
+      } else {
+        await loadAll()
+      }
     }
-    closeDialog()
-    await loadAll()
-    appStore.showSuccess(t('common.saved'))
   } catch (error) {
     appStore.showError(errorMessage(error))
   } finally {
     saving.value = false
+  }
+}
+
+async function syncCreatedSubscription(id: number) {
+  syncingIds.value = new Set(syncingIds.value).add(id)
+  try {
+    await adminAPI.proxies.syncSubscription(id)
+  } catch (error) {
+    appStore.showWarning(
+      t('admin.proxies.openCode.savedSyncFailed', {
+        error: errorMessage(error)
+      }),
+      6000
+    )
+  } finally {
+    const next = new Set(syncingIds.value)
+    next.delete(id)
+    syncingIds.value = next
+    await loadAll()
   }
 }
 

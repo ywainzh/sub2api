@@ -177,7 +177,10 @@ func (r *openCodeProxyPoolRepository) ListNodes(ctx context.Context, subscriptio
 }
 
 func (r *openCodeProxyPoolRepository) UsedListenerPorts(ctx context.Context) (map[int]struct{}, error) {
-	rows, err := r.db.QueryContext(ctx, `SELECT listener_port FROM managed_proxy_nodes WHERE deleted_at IS NULL`)
+	// Listener ports are globally unique, including for soft-deleted nodes. Keep
+	// historical reservations out of circulation so a later subscription sync
+	// cannot collide with the database's non-partial unique constraint.
+	rows, err := r.db.QueryContext(ctx, `SELECT listener_port FROM managed_proxy_nodes`)
 	if err != nil {
 		return nil, err
 	}
