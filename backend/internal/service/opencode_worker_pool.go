@@ -5,7 +5,6 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
-	"sort"
 	"strings"
 	"time"
 )
@@ -315,21 +314,4 @@ func (s *OpenCodeProxyPoolService) AppendFreeModelsForAPIKey(apiKey *APIKey, mod
 		return models
 	}
 	return mergeOpenCodeModelIDs(models, s.FreeModelIDs())
-}
-
-func sortedUniqueInt64(values []int64) []int64 {
-	seen := make(map[int64]struct{}, len(values))
-	out := make([]int64, 0, len(values))
-	for _, value := range values {
-		if value <= 0 {
-			continue
-		}
-		if _, ok := seen[value]; ok {
-			continue
-		}
-		seen[value] = struct{}{}
-		out = append(out, value)
-	}
-	sort.Slice(out, func(i, j int) bool { return out[i] < out[j] })
-	return out
 }
