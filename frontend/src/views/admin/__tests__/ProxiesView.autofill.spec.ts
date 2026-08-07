@@ -6,6 +6,10 @@ import { describe, expect, it } from 'vitest'
 
 const currentDir = dirname(fileURLToPath(import.meta.url))
 const source = readFileSync(resolve(currentDir, '../ProxiesView.vue'), 'utf8')
+const openCodeSource = readFileSync(
+  resolve(currentDir, '../../../components/admin/proxy/OpenCodeProxyPool.vue'),
+  'utf8'
+)
 
 const formMarkup = (id: string) => {
   const idIndex = source.indexOf(`id="${id}"`)
@@ -64,5 +68,20 @@ describe('admin proxy credential autofill protection', () => {
   it('only unlocks credential inputs after explicit user interaction', () => {
     expect(source).toContain('const unlockProxyCredentialField = (event: Event) => {')
     expect(source).toContain('input.readOnly = false')
+  })
+
+  it('protects the OpenCode subscription URL from password-manager autofill', () => {
+    const nameIndex = openCodeSource.indexOf('name="opencode-subscription-secret"')
+    const start = openCodeSource.lastIndexOf('<input', nameIndex)
+    const end = openCodeSource.indexOf('/>', nameIndex)
+    const markup = openCodeSource.slice(start, end)
+
+    expect(openCodeSource).toContain('id="opencode-subscription-form"')
+    expect(openCodeSource).toContain('autocomplete="off"')
+    expect(markup).toContain('type="password"')
+    expect(markup).toContain('autocomplete="new-password"')
+    expect(markup).toContain('data-1p-ignore')
+    expect(markup).toContain('data-lpignore="true"')
+    expect(markup).toContain('data-bwignore="true"')
   })
 })

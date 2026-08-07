@@ -847,6 +847,7 @@ var ProviderSet = wire.NewSet(
 	ProvideBalanceNotifyService,
 	ProvideChannelMonitorService,
 	ProvideChannelMonitorRunner,
+	ProvideOpenCodeProxyPoolService,
 	NewChannelMonitorRequestTemplateService,
 	ProvideUserPlatformQuotaUsageFlusher,
 )
@@ -904,4 +905,15 @@ func ProvideChannelMonitorRunner(svc *ChannelMonitorService, settingService *Set
 	svc.SetScheduler(r)
 	r.Start()
 	return r
+}
+
+func ProvideOpenCodeProxyPoolService(
+	repo OpenCodeProxyPoolRepository,
+	encryptor SecretEncryptor,
+	settingRepo SettingRepository,
+	accountRepo AccountRepository,
+) *OpenCodeProxyPoolService {
+	svc := NewOpenCodeProxyPoolService(repo, encryptor, settingRepo, accountRepo)
+	svc.Start()
+	return svc
 }

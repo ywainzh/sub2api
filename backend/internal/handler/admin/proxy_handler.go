@@ -15,7 +15,12 @@ import (
 
 // ProxyHandler handles admin proxy management
 type ProxyHandler struct {
-	adminService service.AdminService
+	adminService      service.AdminService
+	openCodeProxyPool *service.OpenCodeProxyPoolService
+}
+
+func (h *ProxyHandler) SetOpenCodeProxyPoolService(pool *service.OpenCodeProxyPoolService) {
+	h.openCodeProxyPool = pool
 }
 
 // NewProxyHandler creates a new admin proxy handler

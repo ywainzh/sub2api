@@ -1,6 +1,21 @@
 <template>
   <AppLayout>
-    <TablePageLayout>
+    <div class="flex shrink-0 border-b border-gray-200 bg-white px-4 dark:border-dark-700 dark:bg-dark-900">
+      <button
+        v-for="tab in proxyViews"
+        :key="tab.value"
+        type="button"
+        class="-mb-px border-b-2 px-4 py-3 text-sm font-medium"
+        :class="activeView === tab.value
+          ? 'border-primary-500 text-primary-600 dark:text-primary-400'
+          : 'border-transparent text-gray-500 hover:text-gray-800 dark:text-gray-400 dark:hover:text-gray-200'"
+        @click="activeView = tab.value"
+      >
+        {{ tab.label }}
+      </button>
+    </div>
+    <OpenCodeProxyPool v-if="activeView !== 'standard'" :view="activeView" />
+    <TablePageLayout v-else>
       <template #filters>
         <div class="flex flex-wrap items-center gap-3">
           <!-- Left: Search + Filters -->
@@ -1027,6 +1042,7 @@ import BaseDialog from '@/components/common/BaseDialog.vue'
 import ConfirmDialog from '@/components/common/ConfirmDialog.vue'
 import EmptyState from '@/components/common/EmptyState.vue'
 import ImportDataModal from '@/components/admin/proxy/ImportDataModal.vue'
+import OpenCodeProxyPool from '@/components/admin/proxy/OpenCodeProxyPool.vue'
 import Select from '@/components/common/Select.vue'
 import Icon from '@/components/icons/Icon.vue'
 import PlatformTypeBadge from '@/components/common/PlatformTypeBadge.vue'
@@ -1040,6 +1056,12 @@ import { proxyExpiryBadgeClass, proxyExpiryLabelKey } from '@/utils/proxyExpiry'
 const { t } = useI18n()
 const appStore = useAppStore()
 const { copyToClipboard } = useClipboard()
+const activeView = ref<'standard' | 'subscriptions' | 'nodes'>('standard')
+const proxyViews = computed(() => [
+  { value: 'standard' as const, label: t('admin.proxies.openCode.standardTab') },
+  { value: 'subscriptions' as const, label: t('admin.proxies.openCode.subscriptionsTab') },
+  { value: 'nodes' as const, label: t('admin.proxies.openCode.nodesTab') }
+])
 
 const columns = computed<Column[]>(() => [
   { key: 'select', label: '', sortable: false },

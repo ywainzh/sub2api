@@ -151,7 +151,7 @@ func (s *OpenAIGatewayService) openAIChatCompletionsTargetURL(account *Account) 
 // （回退路径仅面向 APIKey 账号，凭证恒为 openai api_key）。
 func (s *OpenAIGatewayService) resolveCCFallbackTarget(account *Account) (apiKey string, targetURL string, err error) {
 	apiKey = account.GetOpenAIApiKey()
-	if apiKey == "" {
+	if apiKey == "" && !account.IsOpenCodeZen() {
 		return "", "", fmt.Errorf("account %d missing api_key", account.ID)
 	}
 	targetURL, err = s.openAIChatCompletionsTargetURL(account)
@@ -186,7 +186,9 @@ func (s *OpenAIGatewayService) sendCCUpstreamRequest(
 	}
 	upstreamReq = upstreamReq.WithContext(WithHTTPUpstreamProfile(upstreamReq.Context(), HTTPUpstreamProfileOpenAI))
 	upstreamReq.Header.Set("Content-Type", "application/json")
-	upstreamReq.Header.Set("Authorization", "Bearer "+bearerToken)
+	if strings.TrimSpace(bearerToken) != "" {
+		upstreamReq.Header.Set("Authorization", "Bearer "+bearerToken)
+	}
 	if stream {
 		upstreamReq.Header.Set("Accept", "text/event-stream")
 	} else {
@@ -204,6 +206,12 @@ func (s *OpenAIGatewayService) sendCCUpstreamRequest(
 	}
 	if userAgent != "" {
 		upstreamReq.Header.Set("user-agent", userAgent)
+	}
+	if account.IsOpenCodeZen() {
+		applyOpenCodeZenHeaders(upstreamReq.Header, c.Request.Header)
+		if strings.TrimSpace(upstreamReq.Header.Get("user-agent")) == "" {
+			upstreamReq.Header.Set("user-agent", "opencode-cli/1.0.0")
+		}
 	}
 
 	if account.Platform == PlatformGrok {

@@ -87,6 +87,16 @@ func (s *OpenAIGatewayService) forwardAnthropicViaRawChatCompletions(
 			}
 		}
 	}
+	if account.IsOpenCodeZen() {
+		chatBody, err = transformOpenCodeZenChatBody(chatBody, upstreamModel, clientStream)
+		if err == ErrOpenCodeModelNotAllowed {
+			writeAnthropicError(c, http.StatusForbidden, "model_not_allowed", "Model is not available in the OpenCode free model registry")
+			return nil, err
+		}
+		if err != nil {
+			return nil, fmt.Errorf("transform OpenCode Zen request: %w", err)
+		}
+	}
 	// Unlike forwardResponsesViaRawChatCompletions, applyOpenAIFastPolicyToBody
 	// is intentionally skipped: Anthropic Messages bodies carry no service_tier,
 	// so the converted Chat Completions body never contains one and the policy

@@ -1271,9 +1271,41 @@ func (a *Account) IsOpenAIApiKey() bool {
 	return a.IsOpenAI() && a.Type == AccountTypeAPIKey
 }
 
+const (
+	OpenAIProviderModeExtraKey     = "provider_mode"
+	OpenAIProviderModeOpenCodeZen  = "opencode_zen"
+	OpenCodeEgressModeExtraKey     = "opencode_egress_mode"
+	OpenCodeEgressModeProxy        = "proxy"
+	OpenCodeEgressModeServerDirect = "server_direct"
+	OpenCodeZenBaseURL             = "https://opencode.ai/zen/v1"
+)
+
+// IsOpenCodeZen reports whether this account is an OpenCode Zen worker slot.
+// It intentionally remains an OpenAI API-key account so existing scheduling,
+// billing and failover infrastructure can be reused.
+func (a *Account) IsOpenCodeZen() bool {
+	return a != nil && a.IsOpenAIApiKey() && strings.EqualFold(
+		strings.TrimSpace(a.GetExtraString(OpenAIProviderModeExtraKey)),
+		OpenAIProviderModeOpenCodeZen,
+	)
+}
+
+func (a *Account) GetOpenCodeEgressMode() string {
+	if !a.IsOpenCodeZen() {
+		return ""
+	}
+	if strings.EqualFold(strings.TrimSpace(a.GetExtraString(OpenCodeEgressModeExtraKey)), OpenCodeEgressModeServerDirect) {
+		return OpenCodeEgressModeServerDirect
+	}
+	return OpenCodeEgressModeProxy
+}
+
 func (a *Account) GetOpenAIBaseURL() string {
 	if !a.IsOpenAI() {
 		return ""
+	}
+	if a.IsOpenCodeZen() {
+		return OpenCodeZenBaseURL
 	}
 	if a.Type == AccountTypeAPIKey {
 		baseURL := a.GetCredential("base_url")
@@ -1437,6 +1469,9 @@ func (a *Account) SupportsOpenAIEndpointCapability(capability OpenAIEndpointCapa
 	}
 	if !a.IsOpenAICompatible() {
 		return false
+	}
+	if a.IsOpenCodeZen() {
+		return capability == "" || capability == OpenAIEndpointCapabilityChatCompletions
 	}
 	if a.IsGrok() {
 		switch capability {

@@ -1113,12 +1113,19 @@
 
       <!-- API Key input (only for apikey type, excluding Antigravity which has its own fields) -->
       <div v-if="form.type === 'apikey' && form.platform !== 'antigravity'" class="space-y-4">
+        <div v-if="form.platform === 'openai'" class="border-b border-gray-200 pb-4 dark:border-dark-600">
+          <label class="flex items-center justify-between gap-4">
+            <span class="text-sm font-medium text-gray-900 dark:text-white">OpenCode Zen</span>
+            <Toggle v-model="openCodeZenEnabled" aria-label="OpenCode Zen" />
+          </label>
+        </div>
         <div>
           <label class="input-label">{{ t('admin.accounts.baseUrl') }}</label>
           <input
             v-model="apiKeyBaseUrl"
             type="text"
             class="input"
+            :readonly="openCodeZenEnabled"
             :placeholder="
               form.platform === 'openai'
                 ? 'https://api.openai.com'
@@ -1137,11 +1144,12 @@
           />
         </div>
         <div>
-          <label class="input-label">{{ t('admin.accounts.apiKeyRequired') }}</label>
+          <label class="input-label">{{ openCodeZenEnabled ? 'API Key（可选）' : t('admin.accounts.apiKeyRequired') }}</label>
           <input
             v-model="apiKeyValue"
             type="password"
-            required
+            :required="!openCodeZenEnabled"
+            autocomplete="new-password"
             class="input font-mono"
             :placeholder="
               form.platform === 'openai'
@@ -2720,11 +2728,19 @@
         </div>
       </div>
 
-      <div>
+      <div v-if="openCodeZenEnabled" class="border-t border-gray-200 pt-4 dark:border-dark-600">
+        <label class="input-label">OpenCode 出口模式</label>
+        <div class="inline-flex rounded-md border border-gray-200 p-1 dark:border-dark-600">
+          <button type="button" class="px-3 py-1.5 text-sm" :class="openCodeEgressMode === 'proxy' ? 'bg-primary-600 text-white' : 'text-gray-600 dark:text-gray-300'" @click="openCodeEgressMode = 'proxy'">托管节点</button>
+          <button type="button" class="px-3 py-1.5 text-sm" :class="openCodeEgressMode === 'server_direct' ? 'bg-primary-600 text-white' : 'text-gray-600 dark:text-gray-300'" @click="openCodeEgressMode = 'server_direct'; form.proxy_id = null">服务器直连</button>
+        </div>
+      </div>
+
+      <div v-if="!openCodeZenEnabled || openCodeEgressMode === 'proxy'">
         <div class="mb-1 flex items-center gap-2">
           <label class="input-label mb-0">{{ t('admin.accounts.proxy') }}</label>
         </div>
-        <ProxySelector v-model="form.proxy_id" :proxies="proxies" />
+        <ProxySelector v-model="form.proxy_id" :proxies="openCodeZenEnabled ? openCodeProxyOptions : proxies" />
       </div>
 
       <div class="grid grid-cols-2 gap-4 lg:grid-cols-4">
@@ -3725,6 +3741,20 @@ const accountCategory = ref<'oauth-based' | 'apikey' | 'bedrock' | 'service_acco
 const addMethod = ref<AddMethod>('oauth') // For oauth-based: 'oauth' or 'setup-token'
 const apiKeyBaseUrl = ref('https://api.anthropic.com')
 const apiKeyValue = ref('')
+const openCodeZenEnabled = ref(false)
+const openCodeEgressMode = ref<'proxy' | 'server_direct'>('proxy')
+const openCodeManagedProxyIDs = ref(new Set<number>())
+const openCodeProxyOptions = computed(() => props.proxies.filter((proxy) => openCodeManagedProxyIDs.value.has(proxy.id)))
+
+async function loadOpenCodeProxyOptions() {
+  try {
+    const subscriptions = await adminAPI.proxies.listSubscriptions()
+    const batches = await Promise.all(subscriptions.map((item) => adminAPI.proxies.listSubscriptionNodes(item.id)))
+    openCodeManagedProxyIDs.value = new Set(batches.flat().filter((node) => node.health_status === 'healthy' && !node.duplicate_of_node_id && node.proxy_id).map((node) => Number(node.proxy_id)))
+  } catch {
+    openCodeManagedProxyIDs.value = new Set()
+  }
+}
 const upstreamBillingAutoProbeEnabled = ref(true)
 
 const syncPreviewCredentials = computed(() => {
@@ -4183,6 +4213,16 @@ watch(
     }
   }
 )
+
+watch(openCodeZenEnabled, (enabled) => {
+  if (enabled) {
+    apiKeyBaseUrl.value = 'https://opencode.ai/zen/v1'
+    upstreamBillingAutoProbeEnabled.value = false
+    void loadOpenCodeProxyOptions()
+  } else if (form.platform === 'openai') {
+    apiKeyBaseUrl.value = 'https://api.openai.com'
+  }
+})
 
 // Sync form.type based on accountCategory, addMethod, and platform-specific type
 watch(
@@ -4664,6 +4704,9 @@ const resetForm = () => {
   addMethod.value = 'oauth'
   apiKeyBaseUrl.value = 'https://api.anthropic.com'
   apiKeyValue.value = ''
+  openCodeZenEnabled.value = false
+  openCodeEgressMode.value = 'proxy'
+  openCodeManagedProxyIDs.value = new Set()
   upstreamBillingAutoProbeEnabled.value = true
   editQuotaLimit.value = null
   editQuotaDailyLimit.value = null
@@ -5092,7 +5135,7 @@ const handleSubmit = async () => {
   }
 
   // For apikey type, create directly
-  if (!apiKeyValue.value.trim()) {
+  if (!openCodeZenEnabled.value && !apiKeyValue.value.trim()) {
     appStore.showError(t('admin.accounts.pleaseEnterApiKey'))
     return
   }
@@ -5109,7 +5152,7 @@ const handleSubmit = async () => {
 
   // Build credentials with optional model mapping
   const credentials: Record<string, unknown> = {
-    base_url: apiKeyBaseUrl.value.trim() || defaultBaseUrl,
+    base_url: openCodeZenEnabled.value ? 'https://opencode.ai/zen/v1' : (apiKeyBaseUrl.value.trim() || defaultBaseUrl),
     api_key: apiKeyValue.value.trim()
   }
   if (form.platform === 'gemini') {
@@ -5165,7 +5208,15 @@ const handleSubmit = async () => {
   }
 
   form.credentials = credentials
-  const extra = buildAnthropicExtra(buildOpenAIExtra())
+  const extra = buildAnthropicExtra(buildOpenAIExtra()) || {}
+  if (openCodeZenEnabled.value) {
+    extra.provider_mode = 'opencode_zen'
+    extra.opencode_egress_mode = openCodeEgressMode.value
+    if (openCodeEgressMode.value === 'proxy' && !form.proxy_id) {
+      appStore.showError('请选择健康且出口唯一的 OpenCode 托管节点')
+      return
+    }
+  }
 
   await doCreateAccount({
     ...form,

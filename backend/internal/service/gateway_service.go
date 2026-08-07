@@ -1271,12 +1271,24 @@ func (s *GatewayService) GetAvailableModels(ctx context.Context, groupID *int64,
 	// Collect unique models from all accounts
 	modelSet := make(map[string]struct{})
 	hasAnyMapping := false
+	hasOpenCode := false
+	hasStandardOpenAI := false
 
 	for _, acc := range accounts {
+		if acc.Platform == PlatformOpenAI {
+			if acc.IsOpenCodeZen() {
+				hasOpenCode = true
+			} else {
+				hasStandardOpenAI = true
+			}
+		}
 		mapping := acc.GetModelMapping()
 		if len(mapping) > 0 {
 			hasAnyMapping = true
 			for model := range mapping {
+				if acc.IsOpenCodeZen() && !defaultOpenCodeFreeModels.Has(model) {
+					continue
+				}
 				modelSet[model] = struct{}{}
 			}
 		}
@@ -1284,6 +1296,14 @@ func (s *GatewayService) GetAvailableModels(ctx context.Context, groupID *int64,
 
 	// If no account has model_mapping, return nil (use default)
 	if !hasAnyMapping {
+		if hasOpenCode && !hasStandardOpenAI {
+			models := defaultOpenCodeFreeModels.IDs()
+			if s.modelsListCache != nil {
+				s.modelsListCache.Set(cacheKey, cloneStringSlice(models), s.modelsListCacheTTL)
+				modelsListCacheStoreTotal.Add(1)
+			}
+			return models
+		}
 		if s.modelsListCache != nil {
 			s.modelsListCache.Set(cacheKey, []string(nil), s.modelsListCacheTTL)
 			modelsListCacheStoreTotal.Add(1)
@@ -1304,6 +1324,32 @@ func (s *GatewayService) GetAvailableModels(ctx context.Context, groupID *int64,
 	}
 	return cloneStringSlice(models)
 }
+
+func (s *GatewayService) IsOpenCodeZenOnlyGroup(ctx context.Context, groupID *int64) bool {
+	var accounts []Account
+	var err error
+	if groupID != nil {
+		accounts, err = s.accountRepo.ListSchedulableByGroupID(ctx, *groupID)
+	} else {
+		accounts, err = s.accountRepo.ListSchedulable(ctx)
+	}
+	if err != nil {
+		return false
+	}
+	found := false
+	for i := range accounts {
+		if accounts[i].Platform != PlatformOpenAI {
+			continue
+		}
+		if !accounts[i].IsOpenCodeZen() {
+			return false
+		}
+		found = true
+	}
+	return found
+}
+
+func OpenCodeFreeModelIDs() []string { return defaultOpenCodeFreeModels.IDs() }
 
 // GetSchedulablePlatforms returns the concrete platforms that currently have
 // schedulable accounts in the target group.

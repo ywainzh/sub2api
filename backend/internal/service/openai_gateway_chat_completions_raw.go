@@ -112,7 +112,7 @@ func (s *OpenAIGatewayService) forwardAsRawChatCompletions(
 	if err != nil {
 		return nil, err
 	}
-	if strings.TrimSpace(token) == "" {
+	if strings.TrimSpace(token) == "" && !account.IsOpenCodeZen() {
 		return nil, fmt.Errorf("account %d missing %s credential", account.ID, tokenKind)
 	}
 
@@ -143,6 +143,16 @@ func (s *OpenAIGatewayService) forwardAsRawChatCompletions(
 		upstreamBody, err = stripGrokChatPromptCacheKey(upstreamBody)
 		if err != nil {
 			return nil, fmt.Errorf("remove Responses-only Grok prompt cache key: %w", err)
+		}
+	}
+	if account.IsOpenCodeZen() {
+		upstreamBody, err = transformOpenCodeZenChatBody(upstreamBody, upstreamModel, clientStream)
+		if errors.Is(err, ErrOpenCodeModelNotAllowed) {
+			writeChatCompletionsError(c, http.StatusForbidden, "model_not_allowed", "Model is not available in the OpenCode free model registry")
+			return nil, err
+		}
+		if err != nil {
+			return nil, fmt.Errorf("transform OpenCode Zen request: %w", err)
 		}
 	}
 

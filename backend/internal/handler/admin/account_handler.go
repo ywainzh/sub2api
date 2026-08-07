@@ -1035,6 +1035,9 @@ func (h *AccountHandler) scheduleOpenAIResponsesProbe(account *service.Account) 
 	if account == nil || account.Platform != service.PlatformOpenAI || account.Type != service.AccountTypeAPIKey {
 		return
 	}
+	if account.IsOpenCodeZen() {
+		return
+	}
 	if h.accountTestService == nil {
 		return
 	}

@@ -80,6 +80,16 @@ func (s *OpenAIGatewayService) forwardResponsesViaRawChatCompletions(
 		}
 		return nil, err
 	}
+	if account.IsOpenCodeZen() {
+		chatBody, err = transformOpenCodeZenChatBody(chatBody, upstreamModel, clientStream)
+		if errors.Is(err, ErrOpenCodeModelNotAllowed) {
+			writeOpenAIResponsesFallbackError(c, http.StatusForbidden, "model_not_allowed", "Model is not available in the OpenCode free model registry")
+			return nil, err
+		}
+		if err != nil {
+			return nil, fmt.Errorf("transform OpenCode Zen request: %w", err)
+		}
+	}
 	if serviceTier == nil {
 		serviceTier = extractOpenAIServiceTierFromBody(chatBody)
 	}

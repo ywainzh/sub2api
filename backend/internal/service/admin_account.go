@@ -556,8 +556,24 @@ func (s *adminServiceImpl) CreateAccount(ctx context.Context, input *CreateAccou
 	if err != nil {
 		return nil, err
 	}
+	if len(groupIDs) > 0 && !input.SkipMixedChannelCheck {
+		if err := s.checkOpenCodeMixedChannelRisk(ctx, account, groupIDs); err != nil {
+			return nil, err
+		}
+	}
+	if account.IsOpenCodeZen() && s.openCodeProxyPool != nil {
+		if err := s.openCodeProxyPool.ValidateAccountEgress(ctx, account, false); err != nil {
+			return nil, err
+		}
+	}
 	if err := s.accountRepo.Create(ctx, account); err != nil {
 		return nil, err
+	}
+	if account.IsOpenCodeZen() && s.openCodeProxyPool != nil {
+		if err := s.openCodeProxyPool.ValidateAccountEgress(ctx, account, true); err != nil {
+			_ = s.accountRepo.Delete(ctx, account.ID)
+			return nil, err
+		}
 	}
 
 	// 绑定分组
@@ -836,6 +852,16 @@ func (s *adminServiceImpl) UpdateAccount(ctx context.Context, id int64, input *U
 			if err := s.checkMixedChannelRisk(ctx, account.ID, account.Platform, *input.GroupIDs); err != nil {
 				return nil, err
 			}
+			if err := s.checkOpenCodeMixedChannelRisk(ctx, account, *input.GroupIDs); err != nil {
+				return nil, err
+			}
+		}
+	}
+
+	leaseRequired := account.IsOpenCodeZen() && account.IsSchedulable()
+	if leaseRequired && s.openCodeProxyPool != nil {
+		if err := s.openCodeProxyPool.ValidateAccountEgress(ctx, account, true); err != nil {
+			return nil, err
 		}
 	}
 
@@ -892,6 +918,11 @@ func (s *adminServiceImpl) UpdateAccount(ctx context.Context, id int64, input *U
 			return nil, err
 		}
 	}
+	if !leaseRequired && s.openCodeProxyPool != nil {
+		if err := s.openCodeProxyPool.ReleaseAccountEgress(ctx, account.ID); err != nil {
+			return nil, err
+		}
+	}
 
 	// 重新查询以确保返回完整数据（包括正确的 Proxy 关联对象）
 	updated, err := s.accountRepo.GetByID(ctx, id)
@@ -899,6 +930,38 @@ func (s *adminServiceImpl) UpdateAccount(ctx context.Context, id int64, input *U
 		return nil, err
 	}
 	return updated, nil
+}
+
+func (s *adminServiceImpl) checkOpenCodeMixedChannelRisk(ctx context.Context, current *Account, groupIDs []int64) error {
+	if current == nil || current.Platform != PlatformOpenAI {
+		return nil
+	}
+	currentChannel := "OpenAI/standard"
+	if current.IsOpenCodeZen() {
+		currentChannel = "OpenAI/OpenCode Zen"
+	}
+	for _, groupID := range groupIDs {
+		accounts, err := s.accountRepo.ListByGroup(ctx, groupID)
+		if err != nil {
+			return fmt.Errorf("get accounts in group %d: %w", groupID, err)
+		}
+		for i := range accounts {
+			other := &accounts[i]
+			if other.ID == current.ID || other.Platform != PlatformOpenAI || other.IsOpenCodeZen() == current.IsOpenCodeZen() {
+				continue
+			}
+			groupName := fmt.Sprintf("Group %d", groupID)
+			if group, _ := s.groupRepo.GetByID(ctx, groupID); group != nil {
+				groupName = group.Name
+			}
+			otherChannel := "OpenAI/standard"
+			if other.IsOpenCodeZen() {
+				otherChannel = "OpenAI/OpenCode Zen"
+			}
+			return &MixedChannelError{GroupID: groupID, GroupName: groupName, CurrentPlatform: currentChannel, OtherPlatform: otherChannel}
+		}
+	}
+	return nil
 }
 
 // UpdateAccountExtra 仅对 Extra JSONB 做 key 级合并，避免覆盖其它运行态键
@@ -1252,9 +1315,17 @@ func (s *adminServiceImpl) DeleteAccount(ctx context.Context, id int64) error {
 		if err := s.accountRepo.Delete(ctx, shadow.ID); err != nil {
 			return fmt.Errorf("cascade delete spark shadow %d: %w", shadow.ID, err)
 		}
+		if s.openCodeProxyPool != nil {
+			_ = s.openCodeProxyPool.ReleaseAccountEgress(ctx, shadow.ID)
+		}
 	}
 	if err := s.accountRepo.Delete(ctx, id); err != nil {
 		return err
+	}
+	if s.openCodeProxyPool != nil {
+		if err := s.openCodeProxyPool.ReleaseAccountEgress(ctx, id); err != nil {
+			return err
+		}
 	}
 	return nil
 }
@@ -1295,8 +1366,24 @@ func (s *adminServiceImpl) SetAccountError(ctx context.Context, id int64, errorM
 }
 
 func (s *adminServiceImpl) SetAccountSchedulable(ctx context.Context, id int64, schedulable bool) (*Account, error) {
+	if schedulable && s.openCodeProxyPool != nil {
+		account, err := s.accountRepo.GetByID(ctx, id)
+		if err != nil {
+			return nil, err
+		}
+		if account.IsOpenCodeZen() {
+			if err := s.openCodeProxyPool.ValidateAccountEgress(ctx, account, true); err != nil {
+				return nil, err
+			}
+		}
+	}
 	if err := s.accountRepo.SetSchedulable(ctx, id, schedulable); err != nil {
 		return nil, err
+	}
+	if !schedulable && s.openCodeProxyPool != nil {
+		if err := s.openCodeProxyPool.ReleaseAccountEgress(ctx, id); err != nil {
+			return nil, err
+		}
 	}
 	updated, err := s.accountRepo.GetByID(ctx, id)
 	if err != nil {

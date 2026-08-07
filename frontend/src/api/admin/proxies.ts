@@ -15,6 +15,67 @@ import type {
   AdminDataImportResult
 } from '@/types'
 
+export interface ProxySubscription {
+  id: number
+  name: string
+  enabled: boolean
+  sync_interval_minutes: number
+  last_fetched_at?: string | null
+  last_success_at?: string | null
+  last_error?: string
+  node_count: number
+  last_format?: string
+  has_url: boolean
+  url_masked: string
+  created_at: string
+  updated_at: string
+}
+
+export interface ManagedProxyNode {
+  id: number
+  subscription_id: number
+  proxy_id?: number | null
+  node_key: string
+  display_name: string
+  mihomo_name: string
+  protocol: string
+  listener_port: number
+  sync_status: string
+  health_status: string
+  last_seen_at?: string | null
+  exit_ip?: string
+  country?: string
+  region?: string
+  latency_ms?: number | null
+  opencode_http_status?: number | null
+  failure_type?: string
+  failure_message?: string
+  last_probe_at?: string | null
+  duplicate_of_node_id?: number | null
+}
+
+export interface OpenCodeNodeProbeResult {
+  node_id: number
+  success: boolean
+  health_status: string
+  exit_ip?: string
+  country?: string
+  region?: string
+  latency_ms?: number
+  opencode_http_status?: number
+  failure_type?: string
+  failure_message?: string
+  duplicate_of_node_id?: number | null
+}
+
+export interface OpenCodeModelRegistryStatus {
+  ids: string[]
+  count: number
+  last_fetched_at?: string | null
+  last_error?: string
+  using_baseline: boolean
+}
+
 /**
  * List all proxies with pagination
  * @param page - Page number (default: 1)
@@ -255,6 +316,61 @@ export async function importData(payload: {
   return data
 }
 
+export async function listSubscriptions(): Promise<ProxySubscription[]> {
+  const { data } = await apiClient.get<ProxySubscription[]>('/admin/proxy-subscriptions')
+  return data
+}
+
+export async function createSubscription(input: {
+  name: string
+  url: string
+  enabled?: boolean
+  sync_interval_minutes?: number
+}): Promise<ProxySubscription> {
+  const { data } = await apiClient.post<ProxySubscription>('/admin/proxy-subscriptions', input)
+  return data
+}
+
+export async function updateSubscription(id: number, input: {
+  name: string
+  url?: string
+  enabled: boolean
+  sync_interval_minutes: number
+}): Promise<ProxySubscription> {
+  const { data } = await apiClient.put<ProxySubscription>(`/admin/proxy-subscriptions/${id}`, input)
+  return data
+}
+
+export async function deleteSubscription(id: number): Promise<{ message: string }> {
+  const { data } = await apiClient.delete<{ message: string }>(`/admin/proxy-subscriptions/${id}`)
+  return data
+}
+
+export async function syncSubscription(id: number): Promise<ManagedProxyNode[]> {
+  const { data } = await apiClient.post<ManagedProxyNode[]>(`/admin/proxy-subscriptions/${id}/sync`)
+  return data
+}
+
+export async function listSubscriptionNodes(id: number): Promise<ManagedProxyNode[]> {
+  const { data } = await apiClient.get<ManagedProxyNode[]>(`/admin/proxy-subscriptions/${id}/nodes`)
+  return data
+}
+
+export async function probeOpenCodeNodes(nodeIds: number[] = []): Promise<OpenCodeNodeProbeResult[]> {
+  const { data } = await apiClient.post<OpenCodeNodeProbeResult[]>('/admin/opencode/proxies/probe', { node_ids: nodeIds })
+  return data
+}
+
+export async function getOpenCodeModels(): Promise<OpenCodeModelRegistryStatus> {
+  const { data } = await apiClient.get<OpenCodeModelRegistryStatus>('/admin/opencode/models')
+  return data
+}
+
+export async function refreshOpenCodeModels(): Promise<OpenCodeModelRegistryStatus> {
+  const { data } = await apiClient.post<OpenCodeModelRegistryStatus>('/admin/opencode/models/refresh')
+  return data
+}
+
 export const proxiesAPI = {
   list,
   getAll,
@@ -271,7 +387,16 @@ export const proxiesAPI = {
   batchCreate,
   batchDelete,
   exportData,
-  importData
+  importData,
+  listSubscriptions,
+  createSubscription,
+  updateSubscription,
+  deleteSubscription,
+  syncSubscription,
+  listSubscriptionNodes,
+  probeOpenCodeNodes,
+  getOpenCodeModels,
+  refreshOpenCodeModels
 }
 
 export default proxiesAPI

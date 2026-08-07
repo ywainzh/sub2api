@@ -34,6 +34,7 @@
             v-model="editBaseUrl"
             type="text"
             class="input"
+            :readonly="isOpenCodeZen"
             :placeholder="
               account.platform === 'openai'
                 ? 'https://api.openai.com'
@@ -54,7 +55,7 @@
           />
         </div>
         <div>
-          <label class="input-label">{{ t('admin.accounts.apiKey') }}</label>
+          <label class="input-label">{{ isOpenCodeZen ? 'API Key（可选）' : t('admin.accounts.apiKey') }}</label>
           <input
             v-model="editApiKey"
             type="password"
@@ -1407,11 +1408,19 @@
         </div>
       </div>
 
-      <div v-if="!isSparkShadow">
+      <div v-if="isOpenCodeZen" class="border-t border-gray-200 pt-4 dark:border-dark-600">
+        <label class="input-label">OpenCode 出口模式</label>
+        <div class="inline-flex rounded-md border border-gray-200 p-1 dark:border-dark-600">
+          <button type="button" class="px-3 py-1.5 text-sm" :class="editOpenCodeEgressMode === 'proxy' ? 'bg-primary-600 text-white' : 'text-gray-600 dark:text-gray-300'" @click="editOpenCodeEgressMode = 'proxy'">托管节点</button>
+          <button type="button" class="px-3 py-1.5 text-sm" :class="editOpenCodeEgressMode === 'server_direct' ? 'bg-primary-600 text-white' : 'text-gray-600 dark:text-gray-300'" @click="editOpenCodeEgressMode = 'server_direct'; form.proxy_id = null">服务器直连</button>
+        </div>
+      </div>
+
+      <div v-if="!isSparkShadow && (!isOpenCodeZen || editOpenCodeEgressMode === 'proxy')">
         <div class="mb-1 flex items-center gap-2">
           <label class="input-label mb-0">{{ t('admin.accounts.proxy') }}</label>
         </div>
-        <ProxySelector v-model="form.proxy_id" :proxies="proxies" />
+        <ProxySelector v-model="form.proxy_id" :proxies="isOpenCodeZen ? editOpenCodeProxyOptions : proxies" />
       </div>
 
       <div class="grid grid-cols-2 gap-4 lg:grid-cols-4">
@@ -2772,6 +2781,20 @@ interface TempUnschedRuleForm {
 const submitting = ref(false)
 const editBaseUrl = ref('https://api.anthropic.com')
 const editApiKey = ref('')
+const editOpenCodeEgressMode = ref<'proxy' | 'server_direct'>('proxy')
+const editOpenCodeManagedProxyIDs = ref(new Set<number>())
+const isOpenCodeZen = computed(() => props.account?.platform === 'openai' && props.account?.type === 'apikey' && props.account?.extra?.provider_mode === 'opencode_zen')
+const editOpenCodeProxyOptions = computed(() => props.proxies.filter((proxy) => editOpenCodeManagedProxyIDs.value.has(proxy.id)))
+
+async function loadEditOpenCodeProxyOptions() {
+  try {
+    const subscriptions = await adminAPI.proxies.listSubscriptions()
+    const batches = await Promise.all(subscriptions.map((item) => adminAPI.proxies.listSubscriptionNodes(item.id)))
+    editOpenCodeManagedProxyIDs.value = new Set(batches.flat().filter((node) => node.health_status === 'healthy' && !node.duplicate_of_node_id && node.proxy_id).map((node) => Number(node.proxy_id)))
+  } catch {
+    editOpenCodeManagedProxyIDs.value = new Set()
+  }
+}
 // Bedrock credentials
 const editBedrockAccessKeyId = ref('')
 const editBedrockSecretAccessKey = ref('')
@@ -3344,7 +3367,9 @@ const syncFormFromAccount = (newAccount: Account | null) => {
   // Load mixed scheduling setting (only for antigravity accounts)
   mixedScheduling.value = false
   allowOverages.value = false
-	const extra = newAccount.extra as Record<string, unknown> | undefined
+  const extra = newAccount.extra as Record<string, unknown> | undefined
+  editOpenCodeEgressMode.value = extra?.opencode_egress_mode === 'server_direct' ? 'server_direct' : 'proxy'
+  if (extra?.provider_mode === 'opencode_zen') void loadEditOpenCodeProxyOptions()
 	mixedScheduling.value = extra?.mixed_scheduling === true
 	allowOverages.value = extra?.allow_overages === true
 	autoPause5hThreshold.value = typeof extra?.auto_pause_5h_threshold === 'number' ? extra.auto_pause_5h_threshold * 100 : null
@@ -3549,7 +3574,7 @@ const syncFormFromAccount = (newAccount: Account | null) => {
           : newAccount.platform === 'grok'
             ? 'https://api.x.ai/v1'
             : 'https://api.anthropic.com'
-    editBaseUrl.value = (credentials.base_url as string) || platformDefaultUrl
+    editBaseUrl.value = extra?.provider_mode === 'opencode_zen' ? 'https://opencode.ai/zen/v1' : ((credentials.base_url as string) || platformDefaultUrl)
 
     // Load model mappings and detect mode
     loadModelRestrictionFromMapping(credentials.model_mapping as Record<string, unknown> | undefined)
@@ -4145,7 +4170,7 @@ const handleSubmit = async () => {
     // For apikey type, handle credentials update
     if (props.account.type === 'apikey') {
       const currentCredentials = (props.account.credentials as Record<string, unknown>) || {}
-      const newBaseUrl = editBaseUrl.value.trim() || defaultBaseUrl.value
+      const newBaseUrl = isOpenCodeZen.value ? 'https://opencode.ai/zen/v1' : (editBaseUrl.value.trim() || defaultBaseUrl.value)
       const shouldApplyModelMapping = !(props.account.platform === 'openai' && openaiPassthroughEnabled.value)
 
       // Always update credentials for apikey type to handle model mapping changes
@@ -4163,7 +4188,7 @@ const handleSubmit = async () => {
         props.account.credentials_status?.has_api_key ?? Boolean(currentCredentials.api_key)
       if (editApiKey.value.trim()) {
         newCredentials.api_key = editApiKey.value.trim()
-      } else if (!hasExistingApiKey) {
+      } else if (!hasExistingApiKey && !isOpenCodeZen.value) {
         appStore.showError(t('admin.accounts.apiKeyIsRequired'))
         return
       }
@@ -4233,6 +4258,16 @@ const handleSubmit = async () => {
       }
 
       updatePayload.credentials = newCredentials
+      if (isOpenCodeZen.value) {
+        const nextExtra = { ...((props.account.extra as Record<string, unknown>) || {}) }
+        nextExtra.provider_mode = 'opencode_zen'
+        nextExtra.opencode_egress_mode = editOpenCodeEgressMode.value
+        updatePayload.extra = nextExtra
+        if (editOpenCodeEgressMode.value === 'proxy' && !form.proxy_id) {
+          appStore.showError('请选择健康且出口唯一的 OpenCode 托管节点')
+          return
+        }
+      }
     } else if (props.account.type === 'upstream') {
       const currentCredentials = (props.account.credentials as Record<string, unknown>) || {}
       const newCredentials: Record<string, unknown> = { ...currentCredentials }

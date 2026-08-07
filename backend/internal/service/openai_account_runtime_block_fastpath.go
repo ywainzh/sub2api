@@ -131,7 +131,7 @@ func shouldCooldownOpenAITransientUpstreamError(statusCode int, responseBody []b
 }
 
 func (s *OpenAIGatewayService) markOpenAIOAuth429RateLimited(ctx context.Context, account *Account, headers http.Header, responseBody []byte) {
-	if s == nil || !isOpenAIOAuthAccount(account) {
+	if s == nil || (!isOpenAIOAuthAccount(account) && !account.IsOpenCodeZen()) {
 		return
 	}
 	// Spark 影子：不按 /responses 429 的 global x-codex-* 信号做内存运行时熔断(同 handle429,外审第8轮 P1)。
@@ -139,10 +139,21 @@ func (s *OpenAIGatewayService) markOpenAIOAuth429RateLimited(ctx context.Context
 	if account.IsShadow() {
 		return
 	}
-	s.recordOpenAIOAuth429()
+	if isOpenAIOAuthAccount(account) {
+		s.recordOpenAIOAuth429()
+	}
 
-	cooldownUntil := time.Now().Add(openAIOAuth429FallbackCooldown)
-	if s.rateLimitService != nil {
+	fallback := openAIOAuth429FallbackCooldown
+	if account.IsOpenCodeZen() {
+		fallback = time.Minute
+	}
+	now := time.Now()
+	cooldownUntil := now.Add(fallback)
+	if account.IsOpenCodeZen() {
+		if resetAt := parseOpenCode429ResetAt(headers, responseBody, now); resetAt != nil {
+			cooldownUntil = *resetAt
+		}
+	} else if s.rateLimitService != nil {
 		if resetAt := s.rateLimitService.calculateOpenAI429ResetTime(headers); resetAt != nil && resetAt.After(time.Now()) {
 			cooldownUntil = *resetAt
 		} else if resetUnix := parseOpenAIRateLimitResetTime(responseBody); resetUnix != nil {
@@ -154,6 +165,9 @@ func (s *OpenAIGatewayService) markOpenAIOAuth429RateLimited(ctx context.Context
 		}
 	}
 	s.BlockAccountScheduling(account, cooldownUntil, "429")
+	if account.IsOpenCodeZen() && s.rateLimitService != nil && s.rateLimitService.accountRepo != nil {
+		_ = s.rateLimitService.accountRepo.SetRateLimited(ctx, account.ID, cooldownUntil)
+	}
 }
 
 func (s *OpenAIGatewayService) BlockAccountScheduling(account *Account, until time.Time, reason string) {

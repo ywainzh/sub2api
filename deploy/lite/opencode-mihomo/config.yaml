@@ -1,0 +1,8 @@
+mode: rule
+log-level: warning
+allow-lan: true
+external-controller: 0.0.0.0:9090
+proxies: []
+listeners: []
+rules:
+  - MATCH,DIRECT

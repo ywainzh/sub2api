@@ -233,6 +233,32 @@ export default {
       fallbackProxy: 'Backup proxy',
       fallbackDirect: 'Direct connection',
       backupProxy: 'Backup proxy',
+      openCode: {
+        standardTab: 'Standard Proxies',
+        subscriptionsTab: 'OpenCode Subscriptions',
+        nodesTab: 'OpenCode Nodes',
+        addSubscription: 'Add subscription',
+        editSubscription: 'Edit subscription',
+        subscriptionUrl: 'Subscription URL',
+        keepUrl: 'Leave blank to keep the existing URL',
+        name: 'Name',
+        nodes: 'Nodes',
+        interval: 'Sync interval',
+        lastSync: 'Last sync',
+        sync: 'Sync now',
+        deleteConfirm: 'Delete subscription "{name}"?',
+        freeModels: '{count} free models',
+        allHealth: 'All health states',
+        healthy: 'Healthy',
+        transportError: 'Transport error',
+        duplicateExit: 'Duplicate exit',
+        unprobed: 'Not probed',
+        missing: 'Missing',
+        probeAll: 'Probe all',
+        exitIp: 'Exit IP',
+        region: 'Region',
+        lastProbe: 'Last probe'
+      }
     },
 
     // Redeem Codes

@@ -11,10 +11,13 @@ services:
         condition: service_healthy
       redis:
         condition: service_healthy
+      opencode-mihomo:
+        condition: service_started
     ports:
       - "${BIND_HOST:-127.0.0.1}:${HOST_PORT:-39080}:8080"
     volumes:
       - ./data:/app/data
+      - ./opencode-mihomo:/app/data/opencode-mihomo
       - /var/run/docker.sock:/var/run/docker.sock
     group_add:
       - "${DOCKER_GID:?DOCKER_GID must match the host Docker socket group}"
@@ -47,6 +50,10 @@ services:
       ADMIN_PASSWORD: ${ADMIN_PASSWORD:?ADMIN_PASSWORD is required}
       JWT_SECRET: ${JWT_SECRET:?JWT_SECRET is required}
       TOTP_ENCRYPTION_KEY: ${TOTP_ENCRYPTION_KEY:?TOTP_ENCRYPTION_KEY is required}
+      OPENCODE_MIHOMO_CONTROLLER_URL: http://opencode-mihomo:9090
+      OPENCODE_MIHOMO_CONFIG_DIR: /app/data/opencode-mihomo
+      OPENCODE_MIHOMO_PROXY_HOST: opencode-mihomo
+      OPENCODE_MIHOMO_SECRET: ${OPENCODE_MIHOMO_SECRET:?OPENCODE_MIHOMO_SECRET is required}
       TZ: ${TZ:-Asia/Shanghai}
     networks:
       - sub2api-network
@@ -64,6 +71,35 @@ services:
     mem_limit: 384m
     cpus: 1.0
     pids_limit: 256
+
+  opencode-mihomo:
+    image: ${OPENCODE_MIHOMO_IMAGE:-metacubex/mihomo:v1.19.17}
+    container_name: opencode-mihomo
+    restart: unless-stopped
+    init: true
+    command:
+      - -d
+      - /root/.config/mihomo
+      - -f
+      - /root/.config/mihomo/config.yaml
+      - -ext-ctl
+      - 0.0.0.0:9090
+      - -secret
+      - ${OPENCODE_MIHOMO_SECRET:?OPENCODE_MIHOMO_SECRET is required}
+    volumes:
+      - ./opencode-mihomo:/root/.config/mihomo
+    environment:
+      TZ: ${TZ:-Asia/Shanghai}
+    networks:
+      - sub2api-network
+    logging:
+      driver: json-file
+      options:
+        max-size: 10m
+        max-file: "3"
+    mem_limit: 256m
+    cpus: 0.5
+    pids_limit: 128
 
   postgres:
     image: ${POSTGRES_IMAGE:-postgres:18-alpine}

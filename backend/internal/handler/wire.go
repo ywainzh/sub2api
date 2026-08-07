@@ -147,6 +147,12 @@ func ProvideSystemHandler(updateService *service.UpdateService, lockService *ser
 	return admin.NewSystemHandler(updateService, lockService)
 }
 
+func ProvideAdminProxyHandler(adminService service.AdminService, pool *service.OpenCodeProxyPoolService) *admin.ProxyHandler {
+	h := admin.NewProxyHandler(adminService)
+	h.SetOpenCodeProxyPoolService(pool)
+	return h
+}
+
 // ProvideSettingHandler creates SettingHandler with version from BuildInfo
 func ProvideSettingHandler(settingService *service.SettingService, buildInfo BuildInfo, notificationEmailService *service.NotificationEmailService) *SettingHandler {
 	h := NewSettingHandler(settingService, buildInfo.Version)
@@ -248,7 +254,7 @@ var ProviderSet = wire.NewSet(
 	admin.NewGeminiOAuthHandler,
 	admin.NewAntigravityOAuthHandler,
 	admin.NewGrokOAuthHandler,
-	admin.NewProxyHandler,
+	ProvideAdminProxyHandler,
 	admin.NewRedeemHandler,
 	admin.NewPromoHandler,
 	ProvideAdminSettingHandler,

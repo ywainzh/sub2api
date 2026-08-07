@@ -117,6 +117,9 @@ func (s *AccountTestService) ProbeOpenAIAPIKeyResponsesSupport(ctx context.Conte
 		// 仅 OpenAI APIKey 账号需要探测；其他账号类型无能力差异。
 		return
 	}
+	if account.IsOpenCodeZen() {
+		return
+	}
 
 	apiKey := account.GetOpenAIApiKey()
 	if apiKey == "" {

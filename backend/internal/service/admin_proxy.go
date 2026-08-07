@@ -91,6 +91,15 @@ func (s *adminServiceImpl) CreateProxy(ctx context.Context, input *CreateProxyIn
 }
 
 func (s *adminServiceImpl) UpdateProxy(ctx context.Context, id int64, input *UpdateProxyInput) (*Proxy, error) {
+	if s.openCodeProxyPool != nil {
+		managed, err := s.openCodeProxyPool.IsManagedProxy(ctx, id)
+		if err != nil {
+			return nil, err
+		}
+		if managed {
+			return nil, infraerrors.Conflict("MANAGED_PROXY_IMMUTABLE", "managed OpenCode proxies can only be changed through their subscription")
+		}
+	}
 	// 校验：backup_proxy_id 不能是自身
 	if input.BackupProxyID != nil && *input.BackupProxyID == id {
 		return nil, infraerrors.BadRequest("PROXY_BACKUP_SELF", "backup proxy cannot be itself")
@@ -147,6 +156,15 @@ func (s *adminServiceImpl) UpdateProxy(ctx context.Context, id int64, input *Upd
 }
 
 func (s *adminServiceImpl) DeleteProxy(ctx context.Context, id int64) error {
+	if s.openCodeProxyPool != nil {
+		managed, err := s.openCodeProxyPool.IsManagedProxy(ctx, id)
+		if err != nil {
+			return err
+		}
+		if managed {
+			return infraerrors.Conflict("MANAGED_PROXY_IMMUTABLE", "managed OpenCode proxies can only be deleted through their subscription")
+		}
+	}
 	count, err := s.proxyRepo.CountAccountsByProxyID(ctx, id)
 	if err != nil {
 		return err
@@ -164,6 +182,17 @@ func (s *adminServiceImpl) BatchDeleteProxies(ctx context.Context, ids []int64) 
 	}
 
 	for _, id := range ids {
+		if s.openCodeProxyPool != nil {
+			managed, err := s.openCodeProxyPool.IsManagedProxy(ctx, id)
+			if err != nil || managed {
+				reason := "managed OpenCode proxy"
+				if err != nil {
+					reason = err.Error()
+				}
+				result.Skipped = append(result.Skipped, ProxyBatchDeleteSkipped{ID: id, Reason: reason})
+				continue
+			}
+		}
 		count, err := s.proxyRepo.CountAccountsByProxyID(ctx, id)
 		if err != nil {
 			result.Skipped = append(result.Skipped, ProxyBatchDeleteSkipped{

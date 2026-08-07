@@ -1101,8 +1101,12 @@ func (h *GatewayHandler) Models(c *gin.Context) {
 
 	// Get available models from account configurations for the selected group platform.
 	availableModels := h.gatewayService.GetAvailableModels(c.Request.Context(), groupID, platform)
+	openCodeOnly := platform == service.PlatformOpenAI && h.gatewayService.IsOpenCodeZenOnlyGroup(c.Request.Context(), groupID)
 	if apiKey != nil && apiKey.Group != nil && apiKey.Group.ModelWhitelistEnabled() {
 		fallbackModels := defaultModelIDsForPlatform(platform)
+		if openCodeOnly {
+			fallbackModels = service.OpenCodeFreeModelIDs()
+		}
 		source := customModelsListSource(platform, availableModels, fallbackModels)
 		if len(source) == 0 {
 			source = fallbackModels
@@ -1120,12 +1124,19 @@ func (h *GatewayHandler) Models(c *gin.Context) {
 	}
 	if apiKey != nil && apiKey.Group != nil && apiKey.Group.CustomModelsListEnabled() {
 		fallbackModels := defaultModelIDsForPlatform(platform)
+		if openCodeOnly {
+			fallbackModels = service.OpenCodeFreeModelIDs()
+		}
 		availableModels = filterModelsByCustomList(customModelsListSource(platform, availableModels, fallbackModels), fallbackModels, apiKey.Group.ModelsListConfig.Models)
 		writeCustomModelsList(c, platform, availableModels)
 		return
 	}
 
 	if len(availableModels) > 0 {
+		writeModelsList(c, platform, availableModels)
+		return
+	}
+	if openCodeOnly {
 		writeModelsList(c, platform, availableModels)
 		return
 	}
