@@ -1651,13 +1651,20 @@
             <Select
               v-model="openAIResponsesMode"
               :options="openAIResponsesModeOptions"
-              :disabled="!openAITextGenerationCapabilityEnabled"
+              :disabled="isOpenCodeZen || !openAITextGenerationCapabilityEnabled"
               data-testid="openai-responses-mode-select"
             />
           </div>
         </div>
         <div
-          v-if="openAITextGenerationCapabilityEnabled"
+          v-if="isOpenCodeZen"
+          class="rounded-lg bg-primary-50 px-3 py-2 text-xs text-primary-700 dark:bg-primary-900/20 dark:text-primary-300"
+          data-testid="openai-responses-mode-opencode-fixed"
+        >
+          {{ t('admin.accounts.openai.responsesModeOpenCodeFixedHint') }}
+        </div>
+        <div
+          v-else-if="openAITextGenerationCapabilityEnabled"
           class="rounded-lg bg-gray-50 px-3 py-2 text-xs text-gray-600 dark:bg-dark-700 dark:text-gray-300"
         >
           <span class="font-medium">{{ t(openAIResponsesStatusKey) }}</span>
@@ -3409,7 +3416,9 @@ const syncFormFromAccount = (newAccount: Account | null) => {
       : ''
     openAICompactMode.value = (extra?.openai_compact_mode as OpenAICompactMode) || 'auto'
     if (newAccount.type === 'apikey') {
-      openAIResponsesMode.value = normalizeOpenAIResponsesMode(extra?.openai_responses_mode)
+      openAIResponsesMode.value = isOpenCodeZen.value
+        ? 'force_chat_completions'
+        : normalizeOpenAIResponsesMode(extra?.openai_responses_mode)
       openAIEndpointCapabilities.value = readOpenAIEndpointCapabilities(
         newAccount.credentials as Record<string, unknown> | undefined
       )
@@ -4669,7 +4678,9 @@ const handleSubmit = async () => {
         newExtra.openai_compact_mode = openAICompactMode.value
       }
 		if (props.account.type === 'apikey') {
-        if (!openAITextGenerationCapabilityEnabled.value || openAIResponsesMode.value === 'auto') {
+        if (isOpenCodeZen.value) {
+          newExtra.openai_responses_mode = 'force_chat_completions'
+        } else if (!openAITextGenerationCapabilityEnabled.value || openAIResponsesMode.value === 'auto') {
           delete newExtra.openai_responses_mode
         } else {
           newExtra.openai_responses_mode = openAIResponsesMode.value

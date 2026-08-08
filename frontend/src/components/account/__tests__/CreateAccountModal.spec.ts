@@ -263,6 +263,29 @@ describe('CreateAccountModal OpenAI long-context billing', () => {
     expect(createAccountMock.mock.calls[0]?.[0]?.upstream_billing_probe_enabled).toBe(false)
   })
 
+  it('forces Chat Completions when creating an OpenCode Zen account', async () => {
+    const wrapper = mountModal()
+    await selectButtonByText(wrapper, 'OpenAI')
+    await selectButtonByText(wrapper, 'API Key')
+    await wrapper.get('[aria-label="OpenCode Zen"]').trigger('click')
+    await selectButtonByText(wrapper, '服务器直连')
+
+    const responsesMode = wrapper.get('[data-testid="openai-responses-mode-select"]')
+    expect(responsesMode.attributes('disabled')).toBeDefined()
+    expect(wrapper.find('[data-testid="openai-responses-mode-opencode-fixed"]').exists()).toBe(true)
+
+    await wrapper.get('form#create-account-form input[type="text"]').setValue('OpenCode direct')
+    await wrapper.get('form#create-account-form').trigger('submit.prevent')
+    await flushPromises()
+
+    expect(createAccountMock).toHaveBeenCalledTimes(1)
+    expect(createAccountMock.mock.calls[0]?.[0]?.extra).toMatchObject({
+      provider_mode: 'opencode_zen',
+      opencode_egress_mode: 'server_direct',
+      openai_responses_mode: 'force_chat_completions',
+    })
+  })
+
   it('antigravity upstream 创建默认携带上游倍率探测开关', async () => {
     // antigravity upstream 走独立创建 helper，
     // 也必须与其余 API-key 平台一样默认开启探测并传递开关。

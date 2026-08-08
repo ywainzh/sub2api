@@ -14,6 +14,7 @@ import (
 	"time"
 
 	"github.com/Wei-Shaw/sub2api/internal/config"
+	"github.com/Wei-Shaw/sub2api/internal/pkg/openai_compat"
 	"github.com/gin-gonic/gin"
 	"github.com/stretchr/testify/require"
 	"github.com/tidwall/gjson"
@@ -77,6 +78,34 @@ func TestBuildOpenAIResponsesURL_ProbeURL(t *testing.T) {
 			require.Equal(t, tt.want, got)
 		})
 	}
+}
+
+func TestForwardAsChatCompletions_OpenCodeZenIgnoresForceResponsesOverride(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	body := []byte(`{"model":"big-pickle","messages":[{"role":"user","content":"hello"}],"stream":false}`)
+	rec := httptest.NewRecorder()
+	c, _ := gin.CreateTestContext(rec)
+	c.Request = httptest.NewRequest(http.MethodPost, "/v1/chat/completions", bytes.NewReader(body))
+
+	upstream := &httpUpstreamRecorder{resp: &http.Response{
+		StatusCode: http.StatusOK,
+		Header:     http.Header{"Content-Type": []string{"application/json"}},
+		Body: io.NopCloser(strings.NewReader(
+			`{"id":"chatcmpl_opencode","object":"chat.completion","model":"big-pickle","choices":[{"index":0,"message":{"role":"assistant","content":"ok"},"finish_reason":"stop"}],"usage":{"prompt_tokens":1,"completion_tokens":1,"total_tokens":2}}`,
+		)),
+	}}
+	svc := &OpenAIGatewayService{cfg: rawChatCompletionsTestConfig(), httpUpstream: upstream}
+	account := rawChatCompletionsTestAccount()
+	account.Extra = map[string]any{
+		OpenAIProviderModeExtraKey:          OpenAIProviderModeOpenCodeZen,
+		openai_compat.ExtraKeyResponsesMode: string(openai_compat.ResponsesSupportModeForceResponses),
+	}
+
+	result, err := svc.ForwardAsChatCompletions(context.Background(), c, account, body, "", "")
+	require.NoError(t, err)
+	require.NotNil(t, result)
+	require.Equal(t, OpenCodeZenBaseURL+"/chat/completions", upstream.lastReq.URL.String())
+	require.Equal(t, openAIChatCompletionsUpstreamEndpoint, GetActualOpenAIUpstreamEndpoint(c))
 }
 
 func TestForwardAsRawChatCompletions_ForcesStreamUsageUpstreamAndPassesUsageDownstream(t *testing.T) {

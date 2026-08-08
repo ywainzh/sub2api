@@ -3071,13 +3071,20 @@
             <Select
               v-model="openAIResponsesMode"
               :options="openAIResponsesModeOptions"
-              :disabled="!openAITextGenerationCapabilityEnabled"
+              :disabled="openCodeZenEnabled || !openAITextGenerationCapabilityEnabled"
               data-testid="openai-responses-mode-select"
             />
           </div>
         </div>
         <p
-          v-if="!openAITextGenerationCapabilityEnabled"
+          v-if="openCodeZenEnabled"
+          class="rounded-lg bg-primary-50 px-3 py-2 text-xs text-primary-700 dark:bg-primary-900/20 dark:text-primary-300"
+          data-testid="openai-responses-mode-opencode-fixed"
+        >
+          {{ t('admin.accounts.openai.responsesModeOpenCodeFixedHint') }}
+        </p>
+        <p
+          v-else-if="!openAITextGenerationCapabilityEnabled"
           class="rounded-lg bg-amber-50 px-3 py-2 text-xs text-amber-700 dark:bg-amber-900/20 dark:text-amber-300"
           data-testid="openai-responses-mode-not-applicable"
         >
@@ -4217,10 +4224,12 @@ watch(
 watch(openCodeZenEnabled, (enabled) => {
   if (enabled) {
     apiKeyBaseUrl.value = 'https://opencode.ai/zen/v1'
+    openAIResponsesMode.value = 'force_chat_completions'
     upstreamBillingAutoProbeEnabled.value = false
     void loadOpenCodeProxyOptions()
   } else if (form.platform === 'openai') {
     apiKeyBaseUrl.value = 'https://api.openai.com'
+    openAIResponsesMode.value = 'auto'
   }
 })
 
@@ -4854,7 +4863,9 @@ const buildOpenAIExtra = (base?: Record<string, unknown>): Record<string, unknow
     delete extra.openai_compact_mode
   }
 
-  if (
+  if (openCodeZenEnabled.value) {
+    extra.openai_responses_mode = 'force_chat_completions'
+  } else if (
     accountCategory.value === 'apikey' &&
     openAITextGenerationCapabilityEnabled.value &&
     openAIResponsesMode.value !== 'auto'

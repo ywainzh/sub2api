@@ -1290,6 +1290,20 @@ func (a *Account) IsOpenCodeZen() bool {
 	)
 }
 
+// ShouldUseOpenAIResponsesAPI reports whether this account's upstream text
+// endpoint is the Responses API. OpenCode Zen is a Chat Completions-only
+// provider, so its protocol is an account invariant rather than a probe result
+// or an administrator override.
+func (a *Account) ShouldUseOpenAIResponsesAPI() bool {
+	if a == nil {
+		return true
+	}
+	if a.IsOpenCodeZen() {
+		return false
+	}
+	return openai_compat.ShouldUseResponsesAPI(a.Extra)
+}
+
 func (a *Account) GetOpenCodeEgressMode() string {
 	if !a.IsOpenCodeZen() {
 		return ""
@@ -1500,7 +1514,7 @@ func (a *Account) SupportsOpenAIEndpointCapability(capability OpenAIEndpointCapa
 		// credentials 能力集。已探测确认不支持 /v1/responses 的 APIKey 上游
 		// 必须排除——否则会在 forward 阶段被静默降级为 Chat Completions，
 		// 无法完成生图（#4417）。未探测/OAuth 账号保留旧行为（不排除）。
-		if a.Type == AccountTypeAPIKey && !openai_compat.ShouldUseResponsesAPI(a.Extra) {
+		if a.Type == AccountTypeAPIKey && !a.ShouldUseOpenAIResponsesAPI() {
 			return false
 		}
 		// 支持 Responses 的上游同样需具备 chat 能力：复用下方 chat_completions

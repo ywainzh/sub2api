@@ -3,11 +3,24 @@ package repository
 import (
 	"context"
 	"database/sql"
+	"encoding/json"
 	"testing"
 
 	"github.com/DATA-DOG/go-sqlmock"
+	"github.com/Wei-Shaw/sub2api/internal/pkg/openai_compat"
 	"github.com/stretchr/testify/require"
 )
+
+func TestOpenCodeWorkerExtraForcesChatCompletions(t *testing.T) {
+	nodeID := int64(42)
+	raw := openCodeWorkerExtra(7, "proxy", &nodeID)
+
+	var extra map[string]any
+	require.NoError(t, json.Unmarshal([]byte(raw), &extra))
+	require.Equal(t, string(openai_compat.ResponsesSupportModeForceChatCompletions), extra[openai_compat.ExtraKeyResponsesMode])
+	require.Equal(t, "opencode_zen", extra["provider_mode"])
+	require.Equal(t, float64(nodeID), extra["managed_node_id"])
+}
 
 func TestUsedListenerPortsIncludesSoftDeletedReservations(t *testing.T) {
 	db, mock, err := sqlmock.New(sqlmock.QueryMatcherOption(sqlmock.QueryMatcherEqual))

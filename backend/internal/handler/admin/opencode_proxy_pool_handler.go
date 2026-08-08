@@ -1,16 +1,28 @@
 package admin
 
 import (
+	"context"
 	"errors"
 	"net/http"
 	"strconv"
 	"strings"
+	"time"
 
 	"github.com/Wei-Shaw/sub2api/internal/pkg/response"
 	middleware2 "github.com/Wei-Shaw/sub2api/internal/server/middleware"
 	"github.com/Wei-Shaw/sub2api/internal/service"
 	"github.com/gin-gonic/gin"
 )
+
+const openCodeAdminOperationTimeout = 10 * time.Minute
+
+// Long-running subscription and probe operations must finish persisting their
+// results even if the browser or a reverse proxy closes the HTTP request. The
+// bounded detached context retains request values but does not inherit client
+// cancellation.
+func openCodeAdminOperationContext(parent context.Context) (context.Context, context.CancelFunc) {
+	return context.WithTimeout(context.WithoutCancel(parent), openCodeAdminOperationTimeout)
+}
 
 type createProxySubscriptionRequest struct {
 	Name                string `json:"name" binding:"required"`
@@ -146,7 +158,9 @@ func (h *ProxyHandler) SyncProxySubscription(c *gin.Context) {
 		response.BadRequest(c, "Invalid subscription ID")
 		return
 	}
-	items, err := pool.SyncSubscription(c.Request.Context(), id)
+	operationCtx, cancel := openCodeAdminOperationContext(c.Request.Context())
+	defer cancel()
+	items, err := pool.SyncSubscription(operationCtx, id)
 	if err != nil {
 		writeOpenCodeProxyPoolError(c, err)
 		return
@@ -184,7 +198,9 @@ func (h *ProxyHandler) ProbeOpenCodeProxies(c *gin.Context) {
 			return
 		}
 	}
-	items, err := pool.ProbeNodes(c.Request.Context(), req.NodeIDs)
+	operationCtx, cancel := openCodeAdminOperationContext(c.Request.Context())
+	defer cancel()
+	items, err := pool.ProbeNodes(operationCtx, req.NodeIDs)
 	if err != nil {
 		writeOpenCodeProxyPoolError(c, err)
 		return

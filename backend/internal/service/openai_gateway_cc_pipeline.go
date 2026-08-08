@@ -19,6 +19,8 @@ import (
 	"go.uber.org/zap"
 )
 
+const openAIChatCompletionsUpstreamEndpoint = "/v1/chat/completions"
+
 // 本文件收敛三个 CC（Chat Completions）forwarder 之间重复的 HTTP 管线与 SSE
 // 循环骨架（PR #3802 遗留项）：
 //

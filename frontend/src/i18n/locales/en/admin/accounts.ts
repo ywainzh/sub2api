@@ -608,6 +608,7 @@ export default {
         responsesModeAuto: 'Auto',
         responsesModeForceResponses: 'Force Responses',
         responsesModeForceChatCompletions: 'Force Chat Completions',
+        responsesModeOpenCodeFixedHint: 'OpenCode Zen always uses Chat Completions upstream. Sub2API converts Responses and Messages requests automatically.',
         responsesModeTextDisabledHint:
           'Not applicable when the Responses / Chat Completions endpoint is not enabled.',
         endpointCapabilities: 'Endpoint capabilities',

@@ -21,10 +21,44 @@
         </div>
         <div class="rounded-xl border border-gray-200 bg-white p-3 dark:border-dark-600 dark:bg-dark-900">
           <div class="text-xs text-gray-500 dark:text-gray-400">
-            429 / {{ t('admin.proxies.openCode.duplicateExit') }} / {{ t('admin.proxies.openCode.transportError') }}
+            429 / {{ t('admin.proxies.openCode.duplicateExit') }} / {{ t('admin.proxies.openCode.otherFailures') }}
           </div>
-          <div class="mt-1 text-xl font-semibold text-amber-600">
-            {{ pool.rate_limited_nodes }} / {{ pool.duplicate_nodes }} / {{ pool.failed_nodes }}
+          <div class="mt-1 flex items-center text-xl font-semibold text-amber-600">
+            <button
+              type="button"
+              class="inline-flex h-11 min-w-11 items-center justify-center rounded-lg px-2 transition-colors duration-200 hover:bg-amber-100 focus:outline-none focus:ring-2 focus:ring-amber-500 focus:ring-offset-1 disabled:cursor-default disabled:opacity-50 dark:hover:bg-amber-900/30 dark:focus:ring-offset-dark-900"
+              :class="healthFilter === 'rate_limited' ? 'bg-amber-100 ring-1 ring-amber-300 dark:bg-amber-900/30 dark:ring-amber-700' : ''"
+              :disabled="pool.rate_limited_nodes === 0"
+              :title="t('admin.proxies.openCode.viewNodesByStatus', { status: '429', count: pool.rate_limited_nodes })"
+              data-testid="opencode-filter-rate-limited"
+              @click="showNodeFilter('rate_limited')"
+            >
+              {{ pool.rate_limited_nodes }}
+            </button>
+            <span aria-hidden="true">/</span>
+            <button
+              type="button"
+              class="inline-flex h-11 min-w-11 items-center justify-center rounded-lg px-2 transition-colors duration-200 hover:bg-amber-100 focus:outline-none focus:ring-2 focus:ring-amber-500 focus:ring-offset-1 disabled:cursor-default disabled:opacity-50 dark:hover:bg-amber-900/30 dark:focus:ring-offset-dark-900"
+              :class="healthFilter === 'duplicate_exit' ? 'bg-amber-100 ring-1 ring-amber-300 dark:bg-amber-900/30 dark:ring-amber-700' : ''"
+              :disabled="pool.duplicate_nodes === 0"
+              :title="t('admin.proxies.openCode.viewNodesByStatus', { status: t('admin.proxies.openCode.duplicateExit'), count: pool.duplicate_nodes })"
+              data-testid="opencode-filter-duplicate"
+              @click="showNodeFilter('duplicate_exit')"
+            >
+              {{ pool.duplicate_nodes }}
+            </button>
+            <span aria-hidden="true">/</span>
+            <button
+              type="button"
+              class="inline-flex h-11 min-w-11 items-center justify-center rounded-lg px-2 transition-colors duration-200 hover:bg-amber-100 focus:outline-none focus:ring-2 focus:ring-amber-500 focus:ring-offset-1 disabled:cursor-default disabled:opacity-50 dark:hover:bg-amber-900/30 dark:focus:ring-offset-dark-900"
+              :class="healthFilter === 'failed' ? 'bg-amber-100 ring-1 ring-amber-300 dark:bg-amber-900/30 dark:ring-amber-700' : ''"
+              :disabled="pool.failed_nodes === 0"
+              :title="t('admin.proxies.openCode.viewNodesByStatus', { status: t('admin.proxies.openCode.otherFailures'), count: pool.failed_nodes })"
+              data-testid="opencode-filter-failed"
+              @click="showNodeFilter('failed')"
+            >
+              {{ pool.failed_nodes }}
+            </button>
           </div>
         </div>
         <div class="rounded-xl border border-gray-200 bg-white p-3 dark:border-dark-600 dark:bg-dark-900">
@@ -41,49 +75,6 @@
         </div>
       </div>
 
-      <form class="mt-3 grid items-end gap-3 lg:grid-cols-[auto_auto_9rem_minmax(14rem,1fr)_auto_auto]" autocomplete="off" data-form-type="other" @submit.prevent="savePool">
-        <label class="flex min-h-11 items-center gap-2 text-sm text-gray-700 dark:text-gray-200">
-          <input v-model="poolForm.enabled" type="checkbox" class="h-4 w-4 rounded border-gray-300 text-primary-600" />
-          {{ t('admin.proxies.openCode.enablePool') }}
-        </label>
-        <label class="flex min-h-11 items-center gap-2 text-sm text-gray-700 dark:text-gray-200">
-          <input v-model="poolForm.include_server_direct" type="checkbox" class="h-4 w-4 rounded border-gray-300 text-primary-600" />
-          {{ t('admin.proxies.openCode.includeServerDirect') }}
-        </label>
-        <div>
-          <label class="input-label" for="opencode-worker-concurrency">{{ t('admin.proxies.openCode.workerConcurrency') }}</label>
-          <input id="opencode-worker-concurrency" v-model.number="poolForm.worker_concurrency" class="input" type="number" min="1" max="100" />
-        </div>
-        <div>
-          <label class="input-label" for="opencode-upstream-key">{{ t('admin.proxies.openCode.upstreamKeyOptional') }}</label>
-          <input
-            id="opencode-upstream-key"
-            v-model="poolForm.upstream_api_key"
-            class="input font-mono"
-            type="password"
-            name="opencode-pool-upstream-secret"
-            autocomplete="new-password"
-            data-1p-ignore
-            data-lpignore="true"
-            data-bwignore="true"
-            :disabled="poolForm.clear_upstream_api_key"
-            :placeholder="pool.upstream_key_configured ? t('admin.proxies.openCode.keepUpstreamKey') : t('admin.proxies.openCode.keylessPlaceholder')"
-          />
-        </div>
-        <label class="flex min-h-11 items-center gap-2 text-sm text-gray-700 dark:text-gray-200">
-          <input v-model="poolForm.clear_upstream_api_key" type="checkbox" class="h-4 w-4 rounded border-gray-300 text-primary-600" />
-          {{ t('admin.proxies.openCode.clearUpstreamKey') }}
-        </label>
-        <div class="flex gap-2">
-          <button class="btn btn-secondary" type="button" :disabled="reconciling" @click="reconcilePool">
-            <Icon name="refresh" size="sm" :class="reconciling ? 'animate-spin' : ''" class="mr-1" />
-            {{ t('admin.proxies.openCode.reconcile') }}
-          </button>
-          <button class="btn btn-primary" type="submit" :disabled="savingPool">
-            {{ t('common.save') }}
-          </button>
-        </div>
-      </form>
       <p v-if="pool.reconcile_error" class="mt-2 text-xs text-red-600" role="alert">{{ pool.reconcile_error }}</p>
     </section>
 
@@ -114,6 +105,9 @@
             {{ t('admin.proxies.openCode.healthy') }}
           </option>
           <option value="rate_limited">429</option>
+          <option value="failed">
+            {{ t('admin.proxies.openCode.otherFailures') }}
+          </option>
           <option value="transport_error">
             {{ t('admin.proxies.openCode.transportError') }}
           </option>
@@ -127,11 +121,46 @@
         <button class="btn btn-secondary" :disabled="loading" :title="t('common.refresh')" @click="loadAll">
           <Icon name="refresh" size="md" :class="loading ? 'animate-spin' : ''" />
         </button>
-        <button class="btn btn-primary" :disabled="probing || nodes.length === 0" @click="probeNodes">
-          <Icon name="play" size="md" class="mr-2" />
-          {{ t('admin.proxies.openCode.probeAll') }}
+        <button
+          class="btn btn-primary"
+          type="button"
+          data-testid="opencode-probe-all"
+          :disabled="probing || probeableNodes.length === 0"
+          :aria-busy="probing"
+          @click="probeNodes"
+        >
+          <Icon :name="probing ? 'refresh' : 'play'" size="md" class="mr-2" :class="probing ? 'animate-spin' : ''" />
+          {{ probing ? t('admin.proxies.openCode.probing') : t('admin.proxies.openCode.probeAll') }}
         </button>
+        <div class="ml-auto flex items-center gap-1.5 text-xs text-gray-500 dark:text-gray-400">
+          <Icon name="clock" size="sm" />
+          <span>
+            {{ t('admin.proxies.openCode.autoRecoveryHint', { minutes: pool?.probe_interval_minutes || 15 }) }}
+          </span>
+        </div>
       </template>
+    </div>
+
+    <div
+      v-if="view === 'nodes' && probing"
+      class="border-b border-primary-200 bg-primary-50/80 px-4 py-3 text-primary-900 dark:border-primary-800 dark:bg-primary-900/20 dark:text-primary-100"
+      role="status"
+      aria-live="polite"
+      data-testid="opencode-probe-progress"
+    >
+      <div class="flex items-start gap-3">
+        <span class="mt-0.5 rounded-full bg-primary-100 p-2 text-primary-700 dark:bg-primary-900/60 dark:text-primary-300">
+          <Icon name="refresh" size="sm" class="animate-spin" />
+        </span>
+        <div class="min-w-0">
+          <p class="text-sm font-medium">
+            {{ t('admin.proxies.openCode.probeInProgress', { count: probingNodeIds.size }) }}
+          </p>
+          <p class="mt-0.5 text-xs text-primary-700 dark:text-primary-300">
+            {{ t('admin.proxies.openCode.probeProgressHint', { seconds: probeElapsedSeconds }) }}
+          </p>
+        </div>
+      </div>
     </div>
 
     <div class="min-h-0 flex-1 overflow-auto">
@@ -232,10 +261,18 @@
             <th class="px-4 py-3">
               {{ t('admin.proxies.openCode.lastProbe') }}
             </th>
+            <th class="px-4 py-3 text-right">
+              {{ t('admin.proxies.columns.actions') }}
+            </th>
           </tr>
         </thead>
         <tbody class="divide-y divide-gray-200 bg-white dark:divide-dark-700 dark:bg-dark-900">
-          <tr v-for="node in filteredNodes" :key="node.id">
+          <tr
+            v-for="node in filteredNodes"
+            :key="node.id"
+            :aria-busy="probingNodeIds.has(node.id)"
+            :class="probingNodeIds.has(node.id) ? 'bg-primary-50/40 dark:bg-primary-900/10' : ''"
+          >
             <td class="px-4 py-3">
               <div class="font-medium text-gray-900 dark:text-white">
                 {{ node.display_name }}
@@ -258,7 +295,16 @@
             </td>
             <td class="px-4 py-3">{{ node.opencode_http_status ?? '-' }}</td>
             <td class="px-4 py-3">
-              <span class="badge" :class="healthClass(node.health_status)" :title="node.failure_message || undefined">
+              <span v-if="probingNodeIds.has(node.id)" class="badge badge-primary" data-testid="opencode-node-probing">
+                <Icon name="refresh" size="xs" class="animate-spin" />
+                {{ t('admin.proxies.openCode.probing') }}
+              </span>
+              <span
+                v-else
+                class="badge"
+                :class="healthClass(node.health_status)"
+                :title="node.failure_message || undefined"
+              >
                 {{ healthLabel(node.health_status) }}
               </span>
             </td>
@@ -273,6 +319,25 @@
             </td>
             <td class="px-4 py-3 text-xs text-gray-500">
               {{ displayTime(node.last_probe_at) }}
+            </td>
+            <td class="px-4 py-2 text-right">
+              <button
+                type="button"
+                class="btn btn-secondary btn-sm min-h-11"
+                :disabled="probing || !isPoolNode(node)"
+                :aria-busy="probingNodeIds.has(node.id)"
+                :title="t('admin.proxies.openCode.probeNode')"
+                :data-testid="`opencode-probe-node-${node.id}`"
+                @click="probeNode(node)"
+              >
+                <Icon
+                  name="refresh"
+                  size="sm"
+                  class="mr-1.5"
+                  :class="probingNodeIds.has(node.id) ? 'animate-spin' : ''"
+                />
+                {{ probingNodeIds.has(node.id) ? t('admin.proxies.openCode.probing') : t('admin.proxies.openCode.probe') }}
+              </button>
             </td>
           </tr>
         </tbody>
@@ -345,12 +410,13 @@
 </template>
 
 <script setup lang="ts">
-import { computed, onMounted, reactive, ref, watch } from 'vue'
+import { computed, onMounted, onUnmounted, reactive, ref, watch } from 'vue'
 import { useI18n } from 'vue-i18n'
 import { adminAPI } from '@/api/admin'
 import type {
   ManagedProxyNode,
   OpenCodeModelRegistryStatus,
+  OpenCodeNodeProbeResult,
   OpenCodePool,
   OpenCodePoolWorker,
   ProxySubscription
@@ -360,6 +426,7 @@ import BaseDialog from '@/components/common/BaseDialog.vue'
 import Icon from '@/components/icons/Icon.vue'
 
 const props = defineProps<{ view: 'subscriptions' | 'nodes' }>()
+const emit = defineEmits<{ showNodes: [] }>()
 const { t } = useI18n()
 const appStore = useAppStore()
 const subscriptions = ref<ProxySubscription[]>([])
@@ -369,33 +436,50 @@ const pool = ref<OpenCodePool | null>(null)
 const workers = ref<OpenCodePoolWorker[]>([])
 const loading = ref(false)
 const probing = ref(false)
+const probingNodeIds = ref(new Set<number>())
+const probeElapsedSeconds = ref(0)
 const refreshingModels = ref(false)
 const syncingIds = ref(new Set<number>())
-const healthFilter = ref('')
+type NodeHealthFilter = '' | 'healthy' | 'rate_limited' | 'duplicate_exit' | 'failed' | 'transport_error' | 'unprobed'
+const healthFilter = ref<NodeHealthFilter>('')
 const showDialog = ref(false)
 const editing = ref<ProxySubscription | null>(null)
 const saving = ref(false)
-const savingPool = ref(false)
-const reconciling = ref(false)
 const form = reactive({
   name: '',
   url: '',
   enabled: true,
   sync_interval_minutes: 360
 })
-const poolForm = reactive({
-  enabled: true,
-  include_server_direct: true,
-  worker_concurrency: 1,
-  upstream_api_key: '',
-  clear_upstream_api_key: false
-})
-
 const errorMessage = (error: unknown) =>
   error && typeof error === 'object' && 'message' in error ? String(error.message) : String(error)
-const filteredNodes = computed(() =>
-  healthFilter.value ? nodes.value.filter((node) => node.health_status === healthFilter.value) : nodes.value
+const enabledSubscriptionIds = computed(
+  () => new Set(subscriptions.value.filter((subscription) => subscription.enabled).map((subscription) => subscription.id))
 )
+const isPoolNode = (node: ManagedProxyNode) =>
+  enabledSubscriptionIds.value.has(node.subscription_id) && node.sync_status === 'active'
+const probeableNodes = computed(() => nodes.value.filter(isPoolNode))
+const isOtherFailedNode = (node: ManagedProxyNode) =>
+  isPoolNode(node) &&
+  !['healthy', 'rate_limited', 'duplicate_exit'].includes(node.health_status)
+const filteredNodes = computed(() => {
+  if (!healthFilter.value) return nodes.value
+  if (healthFilter.value === 'failed') return nodes.value.filter(isOtherFailedNode)
+  if (healthFilter.value === 'duplicate_exit') {
+    return nodes.value.filter(
+      (node) => isPoolNode(node) && (node.health_status === 'duplicate_exit' || node.duplicate_of_node_id != null)
+    )
+  }
+  if (healthFilter.value === 'healthy') {
+    return nodes.value.filter(
+      (node) => isPoolNode(node) && node.health_status === 'healthy' && node.duplicate_of_node_id == null
+    )
+  }
+  if (healthFilter.value === 'rate_limited') {
+    return nodes.value.filter((node) => isPoolNode(node) && node.health_status === healthFilter.value)
+  }
+  return nodes.value.filter((node) => node.health_status === healthFilter.value)
+})
 const workerByNodeId = computed(() => {
   const mapped = new Map<number, OpenCodePoolWorker>()
   for (const worker of workers.value) {
@@ -418,9 +502,16 @@ const healthLabel = (status: string) =>
     rate_limited: '429',
     duplicate_exit: t('admin.proxies.openCode.duplicateExit'),
     transport_error: t('admin.proxies.openCode.transportError'),
+    auth_error: t('admin.proxies.openCode.authError'),
+    http_error: t('admin.proxies.openCode.httpError'),
     unprobed: t('admin.proxies.openCode.unprobed'),
     missing: t('admin.proxies.openCode.missing')
   })[status] || status
+
+function showNodeFilter(filter: Exclude<NodeHealthFilter, '' | 'healthy' | 'transport_error' | 'unprobed'>) {
+  healthFilter.value = filter
+  if (props.view !== 'nodes') emit('showNodes')
+}
 const workerClass = (status: string) =>
   status === 'active' ? 'badge-success' : status === 'cooling' ? 'badge-warning' : 'badge-gray'
 const workerLabel = (status: string) =>
@@ -429,6 +520,47 @@ const workerLabel = (status: string) =>
     cooling: t('admin.proxies.openCode.workerCooling'),
     inactive: t('admin.proxies.openCode.workerInactive')
   })[status] || status
+
+let probeStartedAt = 0
+let probeElapsedTimer: number | undefined
+
+function startProbeProgress(nodeIds: number[]) {
+  if (probeElapsedTimer !== undefined) window.clearInterval(probeElapsedTimer)
+  probeStartedAt = Date.now()
+  probeElapsedSeconds.value = 0
+  probingNodeIds.value = new Set(nodeIds)
+  probeElapsedTimer = window.setInterval(() => {
+    updateProbeElapsed()
+  }, 1000)
+}
+
+function updateProbeElapsed() {
+  if (probeStartedAt > 0) {
+    probeElapsedSeconds.value = Math.floor((Date.now() - probeStartedAt) / 1000)
+  }
+}
+
+function stopProbeProgress() {
+  if (probeElapsedTimer !== undefined) {
+    window.clearInterval(probeElapsedTimer)
+    probeElapsedTimer = undefined
+  }
+  updateProbeElapsed()
+  probeStartedAt = 0
+  probingNodeIds.value = new Set()
+}
+
+function summarizeProbeResults(results: OpenCodeNodeProbeResult[]) {
+  const healthy = results.filter((result) => result.health_status === 'healthy').length
+  const rateLimited = results.filter((result) => result.health_status === 'rate_limited').length
+  const duplicate = results.filter((result) => result.health_status === 'duplicate_exit').length
+  return {
+    healthy,
+    rateLimited,
+    duplicate,
+    failed: Math.max(0, results.length - healthy - rateLimited - duplicate)
+  }
+}
 
 async function loadAll() {
   loading.value = true
@@ -441,13 +573,6 @@ async function loadAll() {
     subscriptions.value = subscriptionItems
     pool.value = poolStatus
     workers.value = poolWorkers
-    Object.assign(poolForm, {
-      enabled: poolStatus.enabled,
-      include_server_direct: poolStatus.include_server_direct,
-      worker_concurrency: poolStatus.worker_concurrency,
-      upstream_api_key: '',
-      clear_upstream_api_key: false
-    })
     if (props.view === 'nodes') {
       const batches = await Promise.all(
         subscriptions.value.map((item) => adminAPI.proxies.listSubscriptionNodes(item.id))
@@ -460,39 +585,6 @@ async function loadAll() {
     appStore.showError(errorMessage(error))
   } finally {
     loading.value = false
-  }
-}
-
-async function savePool() {
-  savingPool.value = true
-  try {
-    const upstreamKey = poolForm.upstream_api_key.trim()
-    pool.value = await adminAPI.proxies.updateOpenCodePool({
-      enabled: poolForm.enabled,
-      include_server_direct: poolForm.include_server_direct,
-      worker_concurrency: poolForm.worker_concurrency,
-      upstream_api_key: !poolForm.clear_upstream_api_key && upstreamKey ? upstreamKey : undefined,
-      clear_upstream_api_key: poolForm.clear_upstream_api_key
-    })
-    appStore.showSuccess(t('common.saved'))
-    await loadAll()
-  } catch (error) {
-    appStore.showError(errorMessage(error))
-  } finally {
-    savingPool.value = false
-  }
-}
-
-async function reconcilePool() {
-  reconciling.value = true
-  try {
-    workers.value = await adminAPI.proxies.reconcileOpenCodePool()
-    appStore.showSuccess(t('admin.proxies.openCode.reconcileSuccess'))
-    await loadAll()
-  } catch (error) {
-    appStore.showError(errorMessage(error))
-  } finally {
-    reconciling.value = false
   }
 }
 
@@ -614,16 +706,37 @@ async function removeSubscription(item: ProxySubscription) {
   }
 }
 
-async function probeNodes() {
+async function runProbe(nodeIds: number[]) {
+  if (probing.value || nodeIds.length === 0) return
   probing.value = true
+  startProbeProgress(nodeIds)
   try {
-    await adminAPI.proxies.probeOpenCodeNodes(nodes.value.map((node) => node.id))
+    const results = await adminAPI.proxies.probeOpenCodeNodes(nodeIds)
     await loadAll()
+    updateProbeElapsed()
+    const summary = summarizeProbeResults(results)
+    appStore.showSuccess(
+      t('admin.proxies.openCode.probeCompleted', {
+        ...summary,
+        seconds: probeElapsedSeconds.value
+      }),
+      6000
+    )
   } catch (error) {
     appStore.showError(errorMessage(error))
   } finally {
+    stopProbeProgress()
     probing.value = false
   }
+}
+
+async function probeNodes() {
+  await runProbe(probeableNodes.value.map((node) => node.id))
+}
+
+async function probeNode(node: ManagedProxyNode) {
+  if (!isPoolNode(node)) return
+  await runProbe([node.id])
 }
 
 async function refreshModels() {
@@ -639,4 +752,5 @@ async function refreshModels() {
 
 watch(() => props.view, loadAll)
 onMounted(loadAll)
+onUnmounted(stopProbeProgress)
 </script>

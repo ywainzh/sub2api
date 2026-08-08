@@ -639,6 +639,32 @@ describe('EditAccountModal', () => {
     expect(updateAccountMock.mock.calls[0]?.[1]?.extra?.openai_responses_supported).toBe(false)
   })
 
+  it('locks OpenCode Zen accounts to Chat Completions and repairs stale overrides', async () => {
+    const account = buildAccount()
+    account.extra = {
+      provider_mode: 'opencode_zen',
+      opencode_egress_mode: 'server_direct',
+      openai_responses_mode: 'force_responses'
+    }
+    updateAccountMock.mockReset().mockResolvedValue(account)
+    checkMixedChannelRiskMock.mockReset().mockResolvedValue({ has_risk: false })
+
+    const wrapper = mountModal(account)
+    const responsesModeSelect = wrapper.get<HTMLSelectElement>(
+      '[data-testid="openai-responses-mode-select"]'
+    )
+    expect(responsesModeSelect.element.disabled).toBe(true)
+    expect(responsesModeSelect.element.value).toBe('force_chat_completions')
+    expect(wrapper.find('[data-testid="openai-responses-mode-opencode-fixed"]').exists()).toBe(true)
+
+    await wrapper.get('form#edit-account-form').trigger('submit.prevent')
+
+    expect(updateAccountMock).toHaveBeenCalledTimes(1)
+    expect(updateAccountMock.mock.calls[0]?.[1]?.extra?.openai_responses_mode).toBe(
+      'force_chat_completions'
+    )
+  })
+
   it('submits the account upstream billing auto-probe setting', async () => {
     const account = buildAccount()
     updateAccountMock.mockReset()

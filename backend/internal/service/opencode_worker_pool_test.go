@@ -14,6 +14,12 @@ func withOpenCodeFreeModels(t *testing.T, models ...string) {
 	t.Cleanup(func() { defaultOpenCodeFreeModels.Replace(previous) })
 }
 
+func TestHydrateOpenCodePoolExposesAutomaticProbeInterval(t *testing.T) {
+	pool, err := (&OpenCodeProxyPoolService{}).hydrateOpenCodePool(t.Context(), &OpenCodePool{})
+	require.NoError(t, err)
+	require.Equal(t, 15, pool.ProbeIntervalMinutes)
+}
+
 func TestResolveEffectiveAPIKeyUsesOpenCodePoolForFreeModel(t *testing.T) {
 	withOpenCodeFreeModels(t, "big-pickle")
 	poolID, originalGroupID, poolGroupID := int64(1), int64(5), int64(9)

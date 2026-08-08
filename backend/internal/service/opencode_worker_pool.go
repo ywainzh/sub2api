@@ -20,6 +20,7 @@ func (s *OpenCodeProxyPoolService) hydrateOpenCodePool(ctx context.Context, pool
 		}
 		pool.Group = group
 	}
+	pool.ProbeIntervalMinutes = int(openCodeNodeProbeFreshness / time.Minute)
 	return pool, nil
 }
 

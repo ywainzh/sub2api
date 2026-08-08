@@ -10,6 +10,7 @@ import (
 	"time"
 	"unicode/utf8"
 
+	"github.com/Wei-Shaw/sub2api/internal/pkg/openai_compat"
 	"github.com/Wei-Shaw/sub2api/internal/service"
 	"github.com/lib/pq"
 )
@@ -655,10 +656,11 @@ func openCodeWorkerCredentials(apiKey string) string {
 
 func openCodeWorkerExtra(poolID int64, mode string, nodeID *int64) string {
 	payload := map[string]any{
-		service.OpenAIProviderModeExtraKey: service.OpenAIProviderModeOpenCodeZen,
-		service.OpenCodeEgressModeExtraKey: mode,
-		"system_worker":                    "opencode_pool",
-		"opencode_pool_id":                 poolID,
+		service.OpenAIProviderModeExtraKey:  service.OpenAIProviderModeOpenCodeZen,
+		service.OpenCodeEgressModeExtraKey:  mode,
+		openai_compat.ExtraKeyResponsesMode: string(openai_compat.ResponsesSupportModeForceChatCompletions),
+		"system_worker":                     "opencode_pool",
+		"opencode_pool_id":                  poolID,
 	}
 	if nodeID != nil {
 		payload["managed_node_id"] = *nodeID

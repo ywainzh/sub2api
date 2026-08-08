@@ -14,8 +14,12 @@
         {{ tab.label }}
       </button>
     </div>
-    <OpenCodeProxyPool v-if="activeView !== 'standard'" :view="activeView" />
-    <TablePageLayout v-else>
+    <OpenCodeProxyPool
+      v-if="activeView !== 'standard'"
+      :view="activeView"
+      @show-nodes="activeView = 'nodes'"
+    />
+    <TablePageLayout v-else class="pt-4">
       <template #filters>
         <div class="flex flex-wrap items-center gap-3">
           <!-- Left: Search + Filters -->

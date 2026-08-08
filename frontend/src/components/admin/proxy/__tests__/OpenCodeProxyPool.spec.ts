@@ -14,9 +14,7 @@ const api = vi.hoisted(() => ({
   getOpenCodeModels: vi.fn(),
   refreshOpenCodeModels: vi.fn(),
   getOpenCodePool: vi.fn(),
-  updateOpenCodePool: vi.fn(),
-  listOpenCodePoolWorkers: vi.fn(),
-  reconcileOpenCodePool: vi.fn()
+  listOpenCodePoolWorkers: vi.fn()
 }))
 const notifications = vi.hoisted(() => ({
   showSuccess: vi.fn(),
@@ -31,10 +29,18 @@ vi.mock('vue-i18n', async () => {
   return {
     ...actual,
     useI18n: () => ({
-      t: (key: string, params?: Record<string, unknown>) =>
-        key === 'admin.proxies.openCode.savedSyncFailed'
-          ? `saved, sync failed: ${params?.error}`
-          : key
+      t: (key: string, params?: Record<string, unknown>) => {
+        if (key === 'admin.proxies.openCode.savedSyncFailed') {
+          return `saved, sync failed: ${params?.error}`
+        }
+        if (key === 'admin.proxies.openCode.probeInProgress') {
+          return `probing ${params?.count} nodes`
+        }
+        if (key === 'admin.proxies.openCode.probeCompleted') {
+          return `complete: ${params?.healthy}/${params?.rateLimited}/${params?.duplicate}/${params?.failed}`
+        }
+        return key
+      }
     })
   }
 })
@@ -65,9 +71,55 @@ const poolStatus = {
   rate_limited_nodes: 0,
   duplicate_nodes: 0,
   failed_nodes: 0,
+  probe_interval_minutes: 15,
   server_direct_status: 'active',
   created_at: '2026-08-07T00:00:00Z',
   updated_at: '2026-08-07T00:00:00Z'
+}
+
+const managedNode = {
+  id: 28,
+  subscription_id: 2,
+  proxy_id: 40,
+  node_key: 'node-28',
+  display_name: 'JP node',
+  mihomo_name: 'managed-28',
+  protocol: 'vmess',
+  listener_port: 22021,
+  sync_status: 'active',
+  health_status: 'healthy',
+  exit_ip: '203.0.113.28',
+  latency_ms: 250,
+  opencode_http_status: 200,
+  last_probe_at: '2026-08-07T00:00:00Z'
+}
+
+const rateLimitedNode = {
+  ...managedNode,
+  id: 29,
+  proxy_id: 41,
+  node_key: 'node-29',
+  display_name: 'US rate limited node',
+  mihomo_name: 'managed-29',
+  listener_port: 22022,
+  health_status: 'rate_limited',
+  exit_ip: '203.0.113.29',
+  opencode_http_status: 429,
+  failure_type: 'rate_limited'
+}
+
+const authFailedNode = {
+  ...managedNode,
+  id: 30,
+  proxy_id: 42,
+  node_key: 'node-30',
+  display_name: 'US auth failed node',
+  mihomo_name: 'managed-30',
+  listener_port: 22023,
+  health_status: 'auth_error',
+  exit_ip: '203.0.113.30',
+  opencode_http_status: 403,
+  failure_type: 'auth'
 }
 
 describe('OpenCodeProxyPool subscription save flow', () => {
@@ -78,7 +130,6 @@ describe('OpenCodeProxyPool subscription save flow', () => {
     api.getOpenCodeModels.mockResolvedValue({ ids: [], count: 0, using_baseline: true })
     api.getOpenCodePool.mockResolvedValue(poolStatus)
     api.listOpenCodePoolWorkers.mockResolvedValue([])
-    api.reconcileOpenCodePool.mockResolvedValue([])
   })
 
   it('closes and confirms persistence before the initial sync finishes', async () => {
@@ -126,7 +177,25 @@ describe('OpenCodeProxyPool subscription save flow', () => {
     )
   })
 
-  it('keeps pool and subscription secrets out of browser password autofill', async () => {
+  it.each(['subscriptions', 'nodes'] as const)('hides default pool configuration in the %s view', async (view) => {
+    const wrapper = mount(OpenCodeProxyPool, {
+      props: { view },
+      global: {
+        stubs: {
+          Icon: true,
+          BaseDialog: true
+        }
+      }
+    })
+    await flushPromises()
+
+    expect(wrapper.find('#opencode-worker-concurrency').exists()).toBe(false)
+    expect(wrapper.find('#opencode-upstream-key').exists()).toBe(false)
+    expect(wrapper.text()).not.toContain('admin.proxies.openCode.enablePool')
+    expect(wrapper.text()).not.toContain('admin.proxies.openCode.reconcile')
+  })
+
+  it('keeps the subscription secret out of browser password autofill', async () => {
     const wrapper = mount(OpenCodeProxyPool, {
       props: { view: 'subscriptions' },
       global: {
@@ -141,11 +210,6 @@ describe('OpenCodeProxyPool subscription save flow', () => {
     })
     await flushPromises()
 
-    const upstreamKey = wrapper.get('#opencode-upstream-key')
-    expect(upstreamKey.attributes('autocomplete')).toBe('new-password')
-    expect(upstreamKey.attributes('data-1p-ignore')).toBe('')
-    expect(upstreamKey.attributes('data-lpignore')).toBe('true')
-
     const addButton = wrapper.findAll('button').find((button) =>
       button.text().includes('admin.proxies.openCode.addSubscription')
     )
@@ -153,5 +217,152 @@ describe('OpenCodeProxyPool subscription save flow', () => {
     const subscriptionURL = wrapper.get('input[name="opencode-subscription-secret"]')
     expect(subscriptionURL.attributes('autocomplete')).toBe('new-password')
     expect(subscriptionURL.attributes('data-bwignore')).toBe('true')
+  })
+
+  it('shows honest progress immediately and summarizes the completed batch', async () => {
+    let resolveProbe!: (results: Array<Record<string, unknown>>) => void
+    const pendingProbe = new Promise<Array<Record<string, unknown>>>((resolve) => {
+      resolveProbe = resolve
+    })
+    api.listSubscriptions.mockResolvedValue([createdSubscription])
+    api.listSubscriptionNodes.mockResolvedValue([managedNode])
+    api.probeOpenCodeNodes.mockReturnValue(pendingProbe)
+
+    const wrapper = mount(OpenCodeProxyPool, {
+      props: { view: 'nodes' },
+      global: {
+        stubs: {
+          Icon: true,
+          BaseDialog: true
+        }
+      }
+    })
+    await flushPromises()
+
+    const probeButton = wrapper.get('[data-testid="opencode-probe-all"]')
+    await probeButton.trigger('click')
+
+    expect(api.probeOpenCodeNodes).toHaveBeenCalledOnce()
+    expect(api.probeOpenCodeNodes).toHaveBeenCalledWith([28])
+    expect(probeButton.attributes('disabled')).toBeDefined()
+    expect(probeButton.attributes('aria-busy')).toBe('true')
+    expect(probeButton.text()).toContain('admin.proxies.openCode.probing')
+    expect(wrapper.get('[data-testid="opencode-probe-progress"]').text()).toContain('probing 1 nodes')
+    expect(wrapper.get('[data-testid="opencode-node-probing"]').exists()).toBe(true)
+
+    resolveProbe([
+      {
+        node_id: 28,
+        success: true,
+        health_status: 'healthy',
+        exit_ip: '203.0.113.28',
+        opencode_http_status: 200
+      },
+      { node_id: 29, success: false, health_status: 'rate_limited', opencode_http_status: 429 },
+      { node_id: 30, success: false, health_status: 'duplicate_exit' },
+      { node_id: 31, success: false, health_status: 'transport_error' }
+    ])
+    await flushPromises()
+
+    expect(wrapper.find('[data-testid="opencode-probe-progress"]').exists()).toBe(false)
+    expect(wrapper.find('[data-testid="opencode-node-probing"]').exists()).toBe(false)
+    expect(notifications.showSuccess).toHaveBeenCalledWith('complete: 1/1/1/1', 6000)
+    wrapper.unmount()
+  })
+
+  it('probes only the selected node from its row action', async () => {
+    let resolveProbe!: (results: Array<Record<string, unknown>>) => void
+    const pendingProbe = new Promise<Array<Record<string, unknown>>>((resolve) => {
+      resolveProbe = resolve
+    })
+    api.listSubscriptions.mockResolvedValue([createdSubscription])
+    api.listSubscriptionNodes.mockResolvedValue([managedNode, rateLimitedNode])
+    api.probeOpenCodeNodes.mockReturnValue(pendingProbe)
+
+    const wrapper = mount(OpenCodeProxyPool, {
+      props: { view: 'nodes' },
+      global: {
+        stubs: {
+          Icon: true,
+          BaseDialog: true
+        }
+      }
+    })
+    await flushPromises()
+
+    const rowProbeButton = wrapper.get('[data-testid="opencode-probe-node-29"]')
+    await rowProbeButton.trigger('click')
+
+    expect(api.probeOpenCodeNodes).toHaveBeenCalledOnce()
+    expect(api.probeOpenCodeNodes).toHaveBeenCalledWith([29])
+    expect(rowProbeButton.attributes('disabled')).toBeDefined()
+    expect(rowProbeButton.attributes('aria-busy')).toBe('true')
+    expect(wrapper.get('[data-testid="opencode-probe-progress"]').text()).toContain('probing 1 nodes')
+
+    resolveProbe([
+      {
+        node_id: 29,
+        success: true,
+        health_status: 'healthy',
+        exit_ip: '203.0.113.29',
+        opencode_http_status: 200
+      }
+    ])
+    await flushPromises()
+
+    expect(wrapper.find('[data-testid="opencode-probe-progress"]').exists()).toBe(false)
+    expect(notifications.showSuccess).toHaveBeenCalledWith('complete: 1/0/0/0', 6000)
+    wrapper.unmount()
+  })
+
+  it('switches from subscriptions to the matching problem nodes when a metric is clicked', async () => {
+    api.getOpenCodePool.mockResolvedValue({ ...poolStatus, rate_limited_nodes: 1, healthy_nodes: 1 })
+    api.listSubscriptions.mockResolvedValue([createdSubscription])
+    api.listSubscriptionNodes.mockResolvedValue([managedNode, rateLimitedNode])
+
+    const wrapper = mount(OpenCodeProxyPool, {
+      props: { view: 'subscriptions' },
+      global: {
+        stubs: {
+          Icon: true,
+          BaseDialog: true
+        }
+      }
+    })
+    await flushPromises()
+
+    await wrapper.get('[data-testid="opencode-filter-rate-limited"]').trigger('click')
+    expect(wrapper.emitted('showNodes')).toEqual([[]])
+
+    await wrapper.setProps({ view: 'nodes' })
+    await flushPromises()
+
+    expect((wrapper.get('select').element as HTMLSelectElement).value).toBe('rate_limited')
+    expect(wrapper.text()).toContain('US rate limited node')
+    expect(wrapper.text()).not.toContain('JP node')
+  })
+
+  it('drills the aggregate failure metric into every non-429 and non-duplicate failure', async () => {
+    api.getOpenCodePool.mockResolvedValue({ ...poolStatus, failed_nodes: 1, healthy_nodes: 1 })
+    api.listSubscriptions.mockResolvedValue([createdSubscription])
+    api.listSubscriptionNodes.mockResolvedValue([managedNode, rateLimitedNode, authFailedNode])
+
+    const wrapper = mount(OpenCodeProxyPool, {
+      props: { view: 'nodes' },
+      global: {
+        stubs: {
+          Icon: true,
+          BaseDialog: true
+        }
+      }
+    })
+    await flushPromises()
+
+    await wrapper.get('[data-testid="opencode-filter-failed"]').trigger('click')
+
+    expect((wrapper.get('select').element as HTMLSelectElement).value).toBe('failed')
+    expect(wrapper.text()).toContain('US auth failed node')
+    expect(wrapper.text()).not.toContain('US rate limited node')
+    expect(wrapper.text()).not.toContain('JP node')
   })
 })

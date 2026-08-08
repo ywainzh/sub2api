@@ -51,6 +51,35 @@ func TestForwardResponses_ForceChatCompletionsRoutesNonStreamingToChatCompletion
 	require.Equal(t, 2, result.Usage.OutputTokens)
 	require.Equal(t, 1, result.Usage.CacheReadInputTokens)
 	require.False(t, result.Stream)
+	require.Equal(t, openAIChatCompletionsUpstreamEndpoint, GetActualOpenAIUpstreamEndpoint(c))
+}
+
+func TestForwardResponses_OpenCodeZenIgnoresForceResponsesOverride(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	body := []byte(`{"model":"big-pickle","input":"hello","stream":false}`)
+	rec := httptest.NewRecorder()
+	c, _ := gin.CreateTestContext(rec)
+	c.Request = httptest.NewRequest(http.MethodPost, "/v1/responses", bytes.NewReader(body))
+
+	upstream := &httpUpstreamRecorder{resp: &http.Response{
+		StatusCode: http.StatusOK,
+		Header:     http.Header{"Content-Type": []string{"application/json"}},
+		Body: io.NopCloser(strings.NewReader(
+			`{"id":"chatcmpl_opencode","object":"chat.completion","model":"big-pickle","choices":[{"index":0,"message":{"role":"assistant","content":"ok"},"finish_reason":"stop"}],"usage":{"prompt_tokens":1,"completion_tokens":1,"total_tokens":2}}`,
+		)),
+	}}
+	svc := &OpenAIGatewayService{cfg: rawChatCompletionsTestConfig(), httpUpstream: upstream}
+	account := rawChatCompletionsTestAccount()
+	account.Extra = map[string]any{
+		OpenAIProviderModeExtraKey:          OpenAIProviderModeOpenCodeZen,
+		openai_compat.ExtraKeyResponsesMode: string(openai_compat.ResponsesSupportModeForceResponses),
+	}
+
+	result, err := svc.Forward(context.Background(), c, account, body)
+	require.NoError(t, err)
+	require.NotNil(t, result)
+	require.Equal(t, OpenCodeZenBaseURL+"/chat/completions", upstream.lastReq.URL.String())
+	require.Equal(t, openAIChatCompletionsUpstreamEndpoint, GetActualOpenAIUpstreamEndpoint(c))
 }
 
 func TestForwardResponses_ForceChatCompletionsRoutesStreamingToChatCompletions(t *testing.T) {

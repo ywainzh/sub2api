@@ -14,6 +14,10 @@ const {
   showError,
   showSuccess,
   copyToClipboard,
+  updateKey,
+  bindOpenCodePool,
+  unbindOpenCodePool,
+  authState,
 } = vi.hoisted(() => ({
   listKeys: vi.fn(),
   getPublicSettings: vi.fn(),
@@ -23,6 +27,10 @@ const {
   showError: vi.fn(),
   showSuccess: vi.fn(),
   copyToClipboard: vi.fn(),
+  updateKey: vi.fn(),
+  bindOpenCodePool: vi.fn(),
+  unbindOpenCodePool: vi.fn(),
+  authState: { isAdmin: true },
 }))
 
 const messages: Record<string, string> = {
@@ -55,7 +63,7 @@ vi.mock('@/api', () => ({
   keysAPI: {
     list: listKeys,
     create: vi.fn(),
-    update: vi.fn(),
+    update: updateKey,
     delete: vi.fn(),
     toggleStatus: vi.fn(),
   },
@@ -69,6 +77,16 @@ vi.mock('@/api', () => ({
     getAvailable: getAvailableGroups,
     getUserGroupRates,
   },
+  adminAPI: {
+    apiKeys: {
+      bindOpenCodePool,
+      unbindOpenCodePool,
+    },
+  },
+}))
+
+vi.mock('@/stores/auth', () => ({
+  useAuthStore: () => authState,
 }))
 
 vi.mock('@/stores/app', () => ({
@@ -162,6 +180,7 @@ const DataTableStub = {
         <div data-test="current-concurrency">
           <slot name="cell-current_concurrency" :value="row.current_concurrency" :row="row" />
         </div>
+        <slot name="cell-actions" :value="row" :row="row" />
         <div
           v-if="columns.some((col) => col.key === 'last_used_ip')"
           data-test="last-used-ip"
@@ -172,6 +191,12 @@ const DataTableStub = {
       <slot name="empty" />
     </div>
   `,
+}
+
+const BaseDialogStub = {
+  name: 'BaseDialog',
+  props: ['show', 'title'],
+  template: '<div v-if="show" data-test="base-dialog"><slot /><slot name="footer" /></div>',
 }
 
 const SelectStub = {
@@ -212,7 +237,7 @@ const mountView = async () => {
         TablePageLayout: TablePageLayoutStub,
         DataTable: DataTableStub,
         Pagination: PaginationStub,
-        BaseDialog: true,
+        BaseDialog: BaseDialogStub,
         ConfirmDialog: true,
         EmptyState: true,
         Select: SelectStub,
@@ -257,6 +282,10 @@ describe('user KeysView column settings', () => {
     showError.mockReset()
     showSuccess.mockReset()
     copyToClipboard.mockReset()
+    updateKey.mockReset()
+    bindOpenCodePool.mockReset()
+    unbindOpenCodePool.mockReset()
+    authState.isAdmin = true
 
     listKeys.mockResolvedValue({
       items: [createApiKey()],
@@ -269,6 +298,9 @@ describe('user KeysView column settings', () => {
     getDashboardApiKeysUsage.mockResolvedValue({ stats: {} })
     getAvailableGroups.mockResolvedValue([])
     getUserGroupRates.mockResolvedValue({})
+    updateKey.mockResolvedValue(createApiKey())
+    bindOpenCodePool.mockResolvedValue({ opencode_bound: true })
+    unbindOpenCodePool.mockResolvedValue({ opencode_bound: false })
   })
 
   it('uses the default API key columns with low-frequency columns hidden', async () => {
@@ -423,5 +455,69 @@ describe('user KeysView column settings', () => {
       },
       expect.objectContaining({ signal: expect.any(AbortSignal) })
     )
+  })
+
+  it('lets an admin append OpenCode from the key edit dialog', async () => {
+    listKeys.mockResolvedValueOnce({
+      items: [{ ...createApiKey(), group_id: 42, opencode_bound: false }],
+      total: 1,
+      page: 1,
+      page_size: 20,
+      pages: 1,
+    })
+    const wrapper = await mountView()
+
+    await wrapper.get('[data-testid="edit-key-1"]').trigger('click')
+    await nextTick()
+    const toggle = wrapper.get('[data-testid="opencode-key-binding-toggle"]')
+    expect(toggle.attributes('aria-checked')).toBe('false')
+
+    await toggle.trigger('click')
+    await wrapper.get('#key-form').trigger('submit')
+    await flushPromises()
+
+    expect(updateKey).toHaveBeenCalledWith(1, expect.objectContaining({ group_id: 42 }))
+    expect(bindOpenCodePool).toHaveBeenCalledWith(1)
+    expect(unbindOpenCodePool).not.toHaveBeenCalled()
+  })
+
+  it('lets an admin remove OpenCode from the key edit dialog', async () => {
+    listKeys.mockResolvedValueOnce({
+      items: [{ ...createApiKey(), group_id: 42, opencode_bound: true }],
+      total: 1,
+      page: 1,
+      page_size: 20,
+      pages: 1,
+    })
+    const wrapper = await mountView()
+
+    await wrapper.get('[data-testid="edit-key-1"]').trigger('click')
+    await nextTick()
+    const toggle = wrapper.get('[data-testid="opencode-key-binding-toggle"]')
+    expect(toggle.attributes('aria-checked')).toBe('true')
+
+    await toggle.trigger('click')
+    await wrapper.get('#key-form').trigger('submit')
+    await flushPromises()
+
+    expect(unbindOpenCodePool).toHaveBeenCalledWith(1)
+    expect(bindOpenCodePool).not.toHaveBeenCalled()
+  })
+
+  it('hides the OpenCode binding control from non-admin users', async () => {
+    authState.isAdmin = false
+    listKeys.mockResolvedValueOnce({
+      items: [{ ...createApiKey(), group_id: 42, opencode_bound: false }],
+      total: 1,
+      page: 1,
+      page_size: 20,
+      pages: 1,
+    })
+    const wrapper = await mountView()
+
+    await wrapper.get('[data-testid="edit-key-1"]').trigger('click')
+    await nextTick()
+
+    expect(wrapper.find('[data-testid="opencode-key-binding-section"]').exists()).toBe(false)
   })
 })

@@ -678,6 +678,7 @@ export default {
         responsesModeAuto: '自动',
         responsesModeForceResponses: '强制 Responses',
         responsesModeForceChatCompletions: '强制 Chat Completions',
+        responsesModeOpenCodeFixedHint: 'OpenCode Zen 上游固定使用 Chat Completions；Responses 和 Messages 请求由 Sub2API 自动转换。',
         responsesModeTextDisabledHint: '未启用 Responses / Chat Completions 端点时，此设置不适用。',
         endpointCapabilities: '端点能力',
         endpointCapabilitiesDesc:

@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/Wei-Shaw/sub2api/internal/pkg/apicompat"
+	"github.com/Wei-Shaw/sub2api/internal/pkg/openai_compat"
 	"github.com/gin-gonic/gin"
 	"github.com/stretchr/testify/require"
 )
@@ -31,6 +32,52 @@ func TestOpenCodeZenAccountContract(t *testing.T) {
 	require.True(t, account.SupportsOpenAIEndpointCapability(OpenAIEndpointCapabilityChatCompletions))
 	require.False(t, account.SupportsOpenAIEndpointCapability(OpenAIEndpointCapabilityResponses))
 	require.False(t, account.SupportsOpenAIEndpointCapability(OpenAIEndpointCapabilityEmbeddings))
+}
+
+func TestOpenCodeZenAlwaysUsesChatCompletionsUpstream(t *testing.T) {
+	for _, mode := range []any{
+		nil,
+		string(openai_compat.ResponsesSupportModeAuto),
+		string(openai_compat.ResponsesSupportModeForceResponses),
+		string(openai_compat.ResponsesSupportModeForceChatCompletions),
+	} {
+		extra := map[string]any{OpenAIProviderModeExtraKey: OpenAIProviderModeOpenCodeZen}
+		if mode != nil {
+			extra[openai_compat.ExtraKeyResponsesMode] = mode
+		}
+		account := &Account{Platform: PlatformOpenAI, Type: AccountTypeAPIKey, Extra: extra}
+		require.Falsef(t, account.ShouldUseOpenAIResponsesAPI(), "mode=%v", mode)
+	}
+}
+
+func TestStandardOpenAIAccountStillHonorsResponsesMode(t *testing.T) {
+	account := &Account{Platform: PlatformOpenAI, Type: AccountTypeAPIKey}
+	require.True(t, account.ShouldUseOpenAIResponsesAPI(), "unknown capability keeps the legacy Responses default")
+
+	account.Extra = map[string]any{
+		openai_compat.ExtraKeyResponsesMode: string(openai_compat.ResponsesSupportModeForceResponses),
+	}
+	require.True(t, account.ShouldUseOpenAIResponsesAPI())
+
+	account.Extra[openai_compat.ExtraKeyResponsesMode] = string(openai_compat.ResponsesSupportModeForceChatCompletions)
+	require.False(t, account.ShouldUseOpenAIResponsesAPI())
+}
+
+func TestNormalizeOpenCodeZenResponsesModePreservesOtherExtra(t *testing.T) {
+	original := map[string]any{
+		OpenAIProviderModeExtraKey:          OpenAIProviderModeOpenCodeZen,
+		OpenCodeEgressModeExtraKey:          OpenCodeEgressModeServerDirect,
+		openai_compat.ExtraKeyResponsesMode: string(openai_compat.ResponsesSupportModeForceResponses),
+		"custom_flag":                       true,
+	}
+
+	normalized := normalizeOpenCodeZenResponsesMode(PlatformOpenAI, AccountTypeAPIKey, original)
+	require.Equal(t, string(openai_compat.ResponsesSupportModeForceChatCompletions), normalized[openai_compat.ExtraKeyResponsesMode])
+	require.Equal(t, true, normalized["custom_flag"])
+	require.Equal(t, string(openai_compat.ResponsesSupportModeForceResponses), original[openai_compat.ExtraKeyResponsesMode], "request map must not be mutated")
+
+	repeated := normalizeOpenCodeZenResponsesMode(PlatformOpenAI, AccountTypeAPIKey, normalized)
+	require.Equal(t, normalized, repeated)
 }
 
 func TestTransformOpenCodeZenChatBody(t *testing.T) {

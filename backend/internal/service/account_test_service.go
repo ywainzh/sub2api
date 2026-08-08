@@ -22,7 +22,6 @@ import (
 	"github.com/Wei-Shaw/sub2api/internal/pkg/claude"
 	"github.com/Wei-Shaw/sub2api/internal/pkg/geminicli"
 	"github.com/Wei-Shaw/sub2api/internal/pkg/openai"
-	"github.com/Wei-Shaw/sub2api/internal/pkg/openai_compat"
 	"github.com/Wei-Shaw/sub2api/internal/pkg/xai"
 	"github.com/Wei-Shaw/sub2api/internal/util/logredact"
 	"github.com/Wei-Shaw/sub2api/internal/util/urlvalidator"
@@ -609,7 +608,7 @@ func (s *AccountTestService) testOpenAIAccountConnection(c *gin.Context, account
 		if err != nil {
 			return s.sendErrorAndEnd(c, fmt.Sprintf("Invalid base URL: %s", err.Error()))
 		}
-		if !openai_compat.ShouldUseResponsesAPI(account.Extra) {
+		if !account.ShouldUseOpenAIResponsesAPI() {
 			return s.testOpenAIChatCompletionsConnection(c, account, testModelID, prompt, normalizedBaseURL, authToken)
 		}
 		apiURL = buildOpenAIResponsesURL(normalizedBaseURL)

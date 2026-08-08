@@ -112,6 +112,8 @@ export default {
     keyDeletedSuccess: 'API 密钥删除成功',
     keyEnabledSuccess: 'API 密钥已启用',
     keyDisabledSuccess: 'API 密钥已禁用',
+    appendOpenCode: '追加 OpenCode',
+    appendOpenCodeHint: '开启后，免费模型自动使用 OpenCode Worker 池；其他模型继续使用当前普通分组。',
     failedToLoad: '加载 API 密钥失败',
     failedToSave: '保存 API 密钥失败',
     failedToDelete: '删除 API 密钥失败',

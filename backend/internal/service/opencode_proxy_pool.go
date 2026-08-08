@@ -138,6 +138,7 @@ type OpenCodePool struct {
 	RateLimitedNodes      int        `json:"rate_limited_nodes"`
 	DuplicateNodes        int        `json:"duplicate_nodes"`
 	FailedNodes           int        `json:"failed_nodes"`
+	ProbeIntervalMinutes  int        `json:"probe_interval_minutes"`
 	ServerDirectStatus    string     `json:"server_direct_status,omitempty"`
 	CreatedAt             time.Time  `json:"created_at"`
 	UpdatedAt             time.Time  `json:"updated_at"`
@@ -274,7 +275,7 @@ func (s *OpenCodeProxyPoolService) Start() {
 		_, _ = s.RefreshModels(refreshCtx)
 		refreshCancel()
 		modelTicker := time.NewTicker(6 * time.Hour)
-		probeTicker := time.NewTicker(15 * time.Minute)
+		probeTicker := time.NewTicker(openCodeNodeProbeFreshness)
 		syncTicker := time.NewTicker(time.Minute)
 		defer modelTicker.Stop()
 		defer probeTicker.Stop()

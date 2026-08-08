@@ -15,6 +15,12 @@ import type {
   AdminDataImportResult
 } from '@/types'
 
+// Subscription synchronization also probes every imported node. With the
+// backend's three-node concurrency limit, a larger subscription can
+// legitimately take several minutes, so the global 30s client timeout is not
+// appropriate for these operations.
+const OPEN_CODE_PROBE_REQUEST_TIMEOUT_MS = 10 * 60 * 1000
+
 export interface ProxySubscription {
   id: number
   name: string
@@ -92,6 +98,7 @@ export interface OpenCodePool {
   rate_limited_nodes: number
   duplicate_nodes: number
   failed_nodes: number
+  probe_interval_minutes: number
   server_direct_status?: string
   created_at: string
   updated_at: string
@@ -387,7 +394,11 @@ export async function deleteSubscription(id: number): Promise<{ message: string 
 }
 
 export async function syncSubscription(id: number): Promise<ManagedProxyNode[]> {
-  const { data } = await apiClient.post<ManagedProxyNode[]>(`/admin/proxy-subscriptions/${id}/sync`)
+  const { data } = await apiClient.post<ManagedProxyNode[]>(
+    `/admin/proxy-subscriptions/${id}/sync`,
+    undefined,
+    { timeout: OPEN_CODE_PROBE_REQUEST_TIMEOUT_MS }
+  )
   return data
 }
 
@@ -397,7 +408,11 @@ export async function listSubscriptionNodes(id: number): Promise<ManagedProxyNod
 }
 
 export async function probeOpenCodeNodes(nodeIds: number[] = []): Promise<OpenCodeNodeProbeResult[]> {
-  const { data } = await apiClient.post<OpenCodeNodeProbeResult[]>('/admin/opencode/proxies/probe', { node_ids: nodeIds })
+  const { data } = await apiClient.post<OpenCodeNodeProbeResult[]>(
+    '/admin/opencode/proxies/probe',
+    { node_ids: nodeIds },
+    { timeout: OPEN_CODE_PROBE_REQUEST_TIMEOUT_MS }
+  )
   return data
 }
 

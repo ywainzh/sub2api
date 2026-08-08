@@ -405,6 +405,7 @@
               <!-- Edit Button -->
               <button
                 @click="editKey(row)"
+                :data-testid="`edit-key-${row.id}`"
                 class="flex flex-col items-center gap-0.5 rounded-lg p-1.5 text-gray-500 transition-colors hover:bg-gray-100 hover:text-primary-600 dark:hover:bg-dark-700 dark:hover:text-primary-400"
               >
                 <Icon name="edit" size="sm" />
@@ -545,6 +546,44 @@
             :options="statusOptions"
             :placeholder="t('keys.selectStatus')"
           />
+        </div>
+
+        <div
+          v-if="showEditModal && authStore.isAdmin"
+          class="rounded-xl border border-primary-200 bg-primary-50/70 p-4 dark:border-primary-800 dark:bg-primary-900/20"
+          data-testid="opencode-key-binding-section"
+        >
+          <div class="flex items-center justify-between gap-4">
+            <div class="min-w-0">
+              <p class="text-sm font-medium text-gray-900 dark:text-white">
+                {{ t('keys.appendOpenCode') }}
+              </p>
+              <p class="mt-1 text-xs leading-5 text-gray-600 dark:text-gray-300">
+                {{ t('keys.appendOpenCodeHint') }}
+              </p>
+            </div>
+            <button
+              type="button"
+              role="switch"
+              :aria-checked="formData.append_opencode"
+              :aria-label="t('keys.appendOpenCode')"
+              data-testid="opencode-key-binding-toggle"
+              :class="[
+                'relative h-11 w-14 shrink-0 cursor-pointer rounded-full border transition-colors duration-200 focus:outline-none focus:ring-2 focus:ring-primary-500 focus:ring-offset-2 dark:focus:ring-offset-dark-800',
+                formData.append_opencode
+                  ? 'border-primary-600 bg-primary-600'
+                  : 'border-gray-300 bg-gray-200 dark:border-dark-500 dark:bg-dark-600'
+              ]"
+              @click="formData.append_opencode = !formData.append_opencode"
+            >
+              <span
+                :class="[
+                  'absolute left-0 top-2.5 h-5 w-5 rounded-full bg-white shadow-sm transition-transform duration-200',
+                  formData.append_opencode ? 'translate-x-6' : 'translate-x-1.5'
+                ]"
+              />
+            </button>
+          </div>
         </div>
 
         <!-- IP Restriction Section -->
@@ -1117,11 +1156,12 @@
 	import { ref, reactive, computed, onMounted, onUnmounted, type ComponentPublicInstance } from 'vue'
 	import { useI18n } from 'vue-i18n'
 	import { useAppStore } from '@/stores/app'
+	import { useAuthStore } from '@/stores/auth'
 	import { useClipboard } from '@/composables/useClipboard'
 import { getPersistedPageSize } from '@/composables/usePersistedPageSize'
 
 const { t } = useI18n()
-import { keysAPI, authAPI, usageAPI, userGroupsAPI } from '@/api'
+import { keysAPI, authAPI, usageAPI, userGroupsAPI, adminAPI } from '@/api'
 import AppLayout from '@/components/layout/AppLayout.vue'
 import TablePageLayout from '@/components/layout/TablePageLayout.vue'
 	import DataTable from '@/components/common/DataTable.vue'
@@ -1168,6 +1208,7 @@ interface GroupOption {
 }
 
 const appStore = useAppStore()
+const authStore = useAuthStore()
 const { copyToClipboard: clipboardCopy } = useClipboard()
 
 const allColumns = computed<Column[]>(() => [
@@ -1341,7 +1382,8 @@ const formData = ref({
   rate_limit_7d: null as number | null,
   enable_expiration: false,
   expiration_preset: '30' as '7' | '30' | '90' | 'custom',
-  expiration_date: ''
+  expiration_date: '',
+  append_opencode: false
 })
 
 // 自定义Key验证
@@ -1404,19 +1446,21 @@ const onStatusFilterChange = (value: string | number | boolean | null) => {
 
 // Convert groups to Select options format with rate multiplier and subscription type
 const groupOptions = computed(() =>
-  groups.value.map((group) => ({
-    value: group.id,
-    label: group.name,
-    description: group.description,
-    rate: group.rate_multiplier,
-    userRate: userGroupRates.value[group.id] ?? null,
-    peakRateEnabled: group.peak_rate_enabled,
-    peakStart: group.peak_start,
-    peakEnd: group.peak_end,
-    peakRateMultiplier: group.peak_rate_multiplier,
-    subscriptionType: group.subscription_type,
-    platform: group.platform
-  }))
+  groups.value
+    .filter((group) => group.name !== 'OpenCode Zen Pool')
+    .map((group) => ({
+      value: group.id,
+      label: group.name,
+      description: group.description,
+      rate: group.rate_multiplier,
+      userRate: userGroupRates.value[group.id] ?? null,
+      peakRateEnabled: group.peak_rate_enabled,
+      peakStart: group.peak_start,
+      peakEnd: group.peak_end,
+      peakRateMultiplier: group.peak_rate_multiplier,
+      subscriptionType: group.subscription_type,
+      platform: group.platform
+    }))
 )
 
 // Group dropdown search
@@ -1573,7 +1617,8 @@ const editKey = (key: ApiKey) => {
     rate_limit_7d: key.rate_limit_7d || null,
     enable_expiration: hasExpiration,
     expiration_preset: 'custom',
-    expiration_date: key.expires_at ? formatDateTimeLocal(key.expires_at) : ''
+    expiration_date: key.expires_at ? formatDateTimeLocal(key.expires_at) : '',
+    append_opencode: Boolean(key.opencode_bound)
   }
   showEditModal.value = true
 }
@@ -1728,6 +1773,13 @@ const handleSubmit = async () => {
         updates.status = formData.value.status
       }
       await keysAPI.update(selectedKey.value.id, updates)
+      if (authStore.isAdmin && formData.value.append_opencode !== Boolean(selectedKey.value.opencode_bound)) {
+        if (formData.value.append_opencode) {
+          await adminAPI.apiKeys.bindOpenCodePool(selectedKey.value.id)
+        } else {
+          await adminAPI.apiKeys.unbindOpenCodePool(selectedKey.value.id)
+        }
+      }
       appStore.showSuccess(t('keys.keyUpdatedSuccess'))
     } else {
       const customKey = formData.value.use_custom_key ? formData.value.custom_key : undefined
@@ -1795,7 +1847,8 @@ const closeModals = () => {
     rate_limit_7d: null,
     enable_expiration: false,
     expiration_preset: '30',
-    expiration_date: ''
+    expiration_date: '',
+    append_opencode: false
   }
 }
 

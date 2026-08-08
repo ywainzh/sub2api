@@ -112,6 +112,8 @@ export default {
     keyDeletedSuccess: 'API key deleted successfully',
     keyEnabledSuccess: 'API key enabled successfully',
     keyDisabledSuccess: 'API key disabled successfully',
+    appendOpenCode: 'Append OpenCode',
+    appendOpenCodeHint: 'Free models use the OpenCode worker pool; other models continue using the current group.',
     failedToLoad: 'Failed to load API keys',
     failedToSave: 'Failed to save API key',
     failedToDelete: 'Failed to delete API key',

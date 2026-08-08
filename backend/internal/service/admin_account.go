@@ -16,6 +16,7 @@ import (
 
 	infraerrors "github.com/Wei-Shaw/sub2api/internal/pkg/errors"
 	"github.com/Wei-Shaw/sub2api/internal/pkg/logger"
+	"github.com/Wei-Shaw/sub2api/internal/pkg/openai_compat"
 	"github.com/Wei-Shaw/sub2api/internal/pkg/pagination"
 )
 
@@ -398,6 +399,23 @@ func normalizeOpenAILongContextBillingExtra(platform string, extra map[string]an
 	return normalized, nil
 }
 
+// normalizeOpenCodeZenResponsesMode persists the same invariant enforced by
+// Account.ShouldUseOpenAIResponsesAPI: Zen workers always use the upstream Chat
+// Completions endpoint. Cloning prevents request maps from being mutated as a
+// side effect of validation.
+func normalizeOpenCodeZenResponsesMode(platform, accountType string, extra map[string]any) map[string]any {
+	if platform != PlatformOpenAI || accountType != AccountTypeAPIKey || extra == nil {
+		return extra
+	}
+	providerMode, _ := extra[OpenAIProviderModeExtraKey].(string)
+	if !strings.EqualFold(strings.TrimSpace(providerMode), OpenAIProviderModeOpenCodeZen) {
+		return extra
+	}
+	normalized := maps.Clone(extra)
+	normalized[openai_compat.ExtraKeyResponsesMode] = string(openai_compat.ResponsesSupportModeForceChatCompletions)
+	return normalized
+}
+
 func normalizeOpenAILongContextBillingUpdateExtra(account *Account, input *UpdateAccountInput) (map[string]any, error) {
 	normalized, err := normalizeOpenAILongContextBillingExtra(account.Platform, input.Extra)
 	if err != nil || account.Platform != PlatformOpenAI {
@@ -543,6 +561,7 @@ func (s *adminServiceImpl) CreateAccount(ctx context.Context, input *CreateAccou
 	if err != nil {
 		return nil, err
 	}
+	accountExtra = normalizeOpenCodeZenResponsesMode(input.Platform, input.Type, accountExtra)
 
 	// 绑定分组
 	groupIDs := input.GroupIDs
@@ -649,6 +668,11 @@ func (s *adminServiceImpl) UpdateAccount(ctx context.Context, id int64, input *U
 		if err != nil {
 			return nil, err
 		}
+		effectiveType := account.Type
+		if input.Type != "" {
+			effectiveType = input.Type
+		}
+		normalizedExtra = normalizeOpenCodeZenResponsesMode(account.Platform, effectiveType, normalizedExtra)
 	}
 	previousProbeIdentity := upstreamBillingProbeIdentity(account)
 	previousOllamaUsageIdentity := ollamaCloudUsageIdentity(account)
