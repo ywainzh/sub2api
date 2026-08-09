@@ -104,7 +104,7 @@
         </div>
       </template>
       <template v-else>
-        <select v-model="healthFilter" class="input w-52" @change="loadAll">
+        <select v-model="healthFilter" class="input w-52" @change="handleHealthFilterChange">
           <option value="">{{ t('admin.proxies.openCode.allHealth') }}</option>
           <option value="healthy">
             {{ t('admin.proxies.openCode.healthy') }}
@@ -191,7 +191,7 @@
           </tr>
         </thead>
         <tbody class="divide-y divide-gray-200 bg-white dark:divide-dark-700 dark:bg-dark-900">
-          <tr v-for="subscription in subscriptions" :key="subscription.id">
+          <tr v-for="subscription in paginatedSubscriptions" :key="subscription.id">
             <td class="px-4 py-3 font-medium text-gray-900 dark:text-white">
               {{ subscription.name }}
             </td>
@@ -266,14 +266,14 @@
             <th class="px-4 py-3">
               {{ t('admin.proxies.openCode.lastProbe') }}
             </th>
-            <th class="px-4 py-3 text-right">
+            <th class="px-4 py-3">
               {{ t('admin.proxies.columns.actions') }}
             </th>
           </tr>
         </thead>
         <tbody class="divide-y divide-gray-200 bg-white dark:divide-dark-700 dark:bg-dark-900">
           <tr
-            v-for="node in filteredNodes"
+            v-for="node in paginatedNodes"
             :key="node.id"
             :aria-busy="probingNodeIds.has(node.id)"
             :class="probingNodeIds.has(node.id) ? 'bg-primary-50/40 dark:bg-primary-900/10' : ''"
@@ -331,37 +331,44 @@
 				{{ t('admin.proxies.openCode.retryAt', { time: displayTime(node.retry_at) }) }}
 			  </div>
             </td>
-            <td class="px-4 py-2 text-right">
-			  <div class="flex justify-end gap-2">
-			  <button
-                type="button"
-                class="btn btn-secondary btn-sm min-h-11"
-                :disabled="probing || !isPoolNode(node)"
-                :aria-busy="probingNodeIds.has(node.id)"
-                :title="t('admin.proxies.openCode.probeNode')"
-                :data-testid="`opencode-probe-node-${node.id}`"
-                @click="probeNode(node)"
-              >
-                <Icon
-                  name="refresh"
-                  size="sm"
-                  class="mr-1.5"
-                  :class="probingNodeIds.has(node.id) ? 'animate-spin' : ''"
-                />
-                {{ probingNodeIds.has(node.id) ? t('admin.proxies.openCode.probing') : t('admin.proxies.openCode.probe') }}
-              </button>
-			  <button
-				type="button"
-				class="btn btn-danger btn-sm min-h-11"
-				:disabled="probing || deletingNodeIds.has(node.id)"
-				:title="t('admin.proxies.openCode.deleteNode')"
-				:data-testid="`opencode-delete-node-${node.id}`"
-				@click="deleteNode(node)"
-			  >
-				<Icon name="trash" size="sm" class="mr-1.5" />
-				{{ deletingNodeIds.has(node.id) ? t('common.processing') : t('common.delete') }}
-			  </button>
-			  </div>
+            <td class="px-4 py-2">
+              <div class="flex items-center gap-1 whitespace-nowrap">
+                <button
+                  type="button"
+                  class="flex flex-col items-center gap-0.5 rounded-lg p-1.5 text-gray-500 transition-colors hover:bg-emerald-50 hover:text-emerald-600 disabled:cursor-not-allowed disabled:opacity-50 dark:hover:bg-emerald-900/20 dark:hover:text-emerald-400"
+                  :disabled="probing || !isPoolNode(node)"
+                  :aria-busy="probingNodeIds.has(node.id)"
+                  :title="t('admin.proxies.openCode.probeNode')"
+                  :data-testid="`opencode-probe-node-${node.id}`"
+                  @click="probeNode(node)"
+                >
+                  <Icon
+                    name="refresh"
+                    size="sm"
+                    :class="probingNodeIds.has(node.id) ? 'animate-spin' : ''"
+                  />
+                  <span class="text-xs">
+                    {{
+                      probingNodeIds.has(node.id)
+                        ? t('admin.proxies.openCode.probing')
+                        : t('admin.proxies.openCode.probe')
+                    }}
+                  </span>
+                </button>
+                <button
+                  type="button"
+                  class="flex flex-col items-center gap-0.5 rounded-lg p-1.5 text-gray-500 transition-colors hover:bg-red-50 hover:text-red-600 disabled:cursor-not-allowed disabled:opacity-50 dark:hover:bg-red-900/20 dark:hover:text-red-400"
+                  :disabled="probing || deletingNodeIds.has(node.id)"
+                  :title="t('admin.proxies.openCode.deleteNode')"
+                  :data-testid="`opencode-delete-node-${node.id}`"
+                  @click="deleteNode(node)"
+                >
+                  <Icon name="trash" size="sm" />
+                  <span class="text-xs">
+                    {{ deletingNodeIds.has(node.id) ? t('common.processing') : t('common.delete') }}
+                  </span>
+                </button>
+              </div>
             </td>
           </tr>
         </tbody>
@@ -377,6 +384,27 @@
         {{ t('common.noData') }}
       </div>
     </div>
+
+    <Pagination
+      v-if="view === 'subscriptions' && subscriptions.length > 0"
+      data-testid="opencode-subscription-pagination"
+      :page="subscriptionPagination.page"
+      :page-size="subscriptionPagination.page_size"
+      :total="subscriptions.length"
+      :show-jump="true"
+      @update:page="handleSubscriptionPageChange"
+      @update:page-size="handlePageSizeChange"
+    />
+    <Pagination
+      v-else-if="view === 'nodes' && filteredNodes.length > 0"
+      data-testid="opencode-node-pagination"
+      :page="nodePagination.page"
+      :page-size="nodePagination.page_size"
+      :total="filteredNodes.length"
+      :show-jump="true"
+      @update:page="handleNodePageChange"
+      @update:page-size="handlePageSizeChange"
+    />
 
     <BaseDialog
       :show="showDialog"
@@ -449,7 +477,9 @@ import type {
 } from '@/api/admin/proxies'
 import { useAppStore } from '@/stores/app'
 import BaseDialog from '@/components/common/BaseDialog.vue'
+import Pagination from '@/components/common/Pagination.vue'
 import Icon from '@/components/icons/Icon.vue'
+import { getPersistedPageSize } from '@/composables/usePersistedPageSize'
 
 const props = defineProps<{ view: 'subscriptions' | 'nodes' }>()
 const emit = defineEmits<{ showNodes: [] }>()
@@ -471,6 +501,9 @@ const probeElapsedSeconds = ref(0)
 	const importFileInput = ref<HTMLInputElement | null>(null)
 const refreshingModels = ref(false)
 const syncingIds = ref(new Set<number>())
+const initialPageSize = getPersistedPageSize()
+const subscriptionPagination = reactive({ page: 1, page_size: initialPageSize })
+const nodePagination = reactive({ page: 1, page_size: initialPageSize })
 type NodeHealthFilter = '' | 'healthy' | 'rate_limited' | 'duplicate_exit' | 'failed' | 'transport_error' | 'unprobed' | 'quarantined'
 const healthFilter = ref<NodeHealthFilter>('')
 const showDialog = ref(false)
@@ -511,6 +544,16 @@ const filteredNodes = computed(() => {
   }
   return nodes.value.filter((node) => node.health_status === healthFilter.value)
 })
+function paginate<T>(items: T[], page: number, pageSize: number) {
+  const start = (page - 1) * pageSize
+  return items.slice(start, start + pageSize)
+}
+const paginatedSubscriptions = computed(() =>
+  paginate(subscriptions.value, subscriptionPagination.page, subscriptionPagination.page_size)
+)
+const paginatedNodes = computed(() =>
+  paginate(filteredNodes.value, nodePagination.page, nodePagination.page_size)
+)
 const workerByNodeId = computed(() => {
   const mapped = new Map<number, OpenCodePoolWorker>()
   for (const worker of workers.value) {
@@ -542,7 +585,32 @@ const healthLabel = (status: string) =>
 
 function showNodeFilter(filter: Exclude<NodeHealthFilter, '' | 'healthy' | 'transport_error' | 'unprobed'>) {
   healthFilter.value = filter
+  nodePagination.page = 1
   if (props.view !== 'nodes') emit('showNodes')
+}
+
+function clampPage(total: number, pagination: { page: number; page_size: number }) {
+  const lastPage = Math.max(1, Math.ceil(total / pagination.page_size))
+  if (pagination.page > lastPage) pagination.page = lastPage
+}
+
+function handleSubscriptionPageChange(page: number) {
+  subscriptionPagination.page = page
+}
+
+function handleNodePageChange(page: number) {
+  nodePagination.page = page
+}
+
+function handlePageSizeChange(pageSize: number) {
+  subscriptionPagination.page_size = pageSize
+  subscriptionPagination.page = 1
+  nodePagination.page_size = pageSize
+  nodePagination.page = 1
+}
+
+function handleHealthFilterChange() {
+  nodePagination.page = 1
 }
 const workerClass = (status: string) =>
   status === 'active' ? 'badge-success' : status === 'cooling' ? 'badge-warning' : 'badge-gray'
@@ -872,6 +940,11 @@ async function refreshModels() {
   }
 }
 
+watch(() => subscriptions.value.length, (total) => clampPage(total, subscriptionPagination))
+watch(() => filteredNodes.value.length, (total) => clampPage(total, nodePagination))
+watch(healthFilter, () => {
+  nodePagination.page = 1
+})
 watch(() => props.view, loadAll)
 onMounted(initialLoad)
 onUnmounted(() => {

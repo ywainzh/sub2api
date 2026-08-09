@@ -26,6 +26,18 @@ const notifications = vi.hoisted(() => ({
   showError: vi.fn(),
   showWarning: vi.fn()
 }))
+const PaginationStub = {
+  name: 'Pagination',
+  props: ['page', 'pageSize', 'total'],
+  emits: ['update:page', 'update:pageSize'],
+  template: `
+    <div>
+      <span data-testid="pagination-state">{{ page }}/{{ pageSize }}/{{ total }}</span>
+      <button data-testid="pagination-next" @click="$emit('update:page', page + 1)">next</button>
+      <button data-testid="pagination-size" @click="$emit('update:pageSize', 10)">size</button>
+    </div>
+  `
+}
 
 vi.mock('@/api/admin', () => ({ adminAPI: { proxies: api } }))
 vi.mock('@/stores/app', () => ({ useAppStore: () => notifications }))
@@ -135,6 +147,7 @@ const authFailedNode = {
 
 describe('OpenCodeProxyPool subscription save flow', () => {
   beforeEach(() => {
+    window.localStorage.setItem('table-page-size', '20')
     Object.values(api).forEach((mock) => mock.mockReset())
     Object.values(notifications).forEach((mock) => mock.mockReset())
     api.listSubscriptions.mockResolvedValue([])
@@ -296,6 +309,9 @@ describe('OpenCodeProxyPool subscription save flow', () => {
     await flushPromises()
 
     const rowProbeButton = wrapper.get('[data-testid="opencode-probe-node-29"]')
+    expect(rowProbeButton.classes()).toContain('flex-col')
+    expect(rowProbeButton.classes()).toContain('hover:bg-emerald-50')
+    expect(rowProbeButton.classes()).not.toContain('btn-secondary')
     await rowProbeButton.trigger('click')
 
     expect(api.probeOpenCodeNodes).toHaveBeenCalledOnce()
@@ -331,7 +347,11 @@ describe('OpenCodeProxyPool subscription save flow', () => {
     })
     await flushPromises()
 
-    await wrapper.get('[data-testid="opencode-delete-node-28"]').trigger('click')
+    const deleteButton = wrapper.get('[data-testid="opencode-delete-node-28"]')
+    expect(deleteButton.classes()).toContain('flex-col')
+    expect(deleteButton.classes()).toContain('hover:bg-red-50')
+    expect(deleteButton.classes()).not.toContain('btn-danger')
+    await deleteButton.trigger('click')
     await flushPromises()
 
     expect(window.confirm).toHaveBeenCalledOnce()
@@ -388,5 +408,63 @@ describe('OpenCodeProxyPool subscription save flow', () => {
     expect(wrapper.text()).toContain('US auth failed node')
     expect(wrapper.text()).not.toContain('US rate limited node')
     expect(wrapper.text()).not.toContain('JP node')
+  })
+
+  it('paginates the subscription list independently', async () => {
+    api.listSubscriptions.mockResolvedValue(
+      Array.from({ length: 21 }, (_, index) => ({
+        ...createdSubscription,
+        id: index + 1,
+        name: `subscription-${String(index + 1).padStart(2, '0')}`
+      }))
+    )
+
+    const wrapper = mount(OpenCodeProxyPool, {
+      props: { view: 'subscriptions' },
+      global: { stubs: { Icon: true, BaseDialog: true, Pagination: PaginationStub } }
+    })
+    await flushPromises()
+
+    expect(wrapper.get('[data-testid="opencode-subscription-pagination"]').text()).toContain('1/20/21')
+    expect(wrapper.findAll('tbody tr')).toHaveLength(20)
+    expect(wrapper.text()).toContain('subscription-01')
+    expect(wrapper.text()).not.toContain('subscription-21')
+
+    await wrapper.get('[data-testid="pagination-next"]').trigger('click')
+
+    expect(wrapper.findAll('tbody tr')).toHaveLength(1)
+    expect(wrapper.text()).not.toContain('subscription-01')
+    expect(wrapper.text()).toContain('subscription-21')
+  })
+
+  it('paginates filtered nodes and resets to the first page when page size changes', async () => {
+    api.listSubscriptions.mockResolvedValue([createdSubscription])
+    api.listSubscriptionNodes.mockResolvedValue(
+      Array.from({ length: 21 }, (_, index) => ({
+        ...managedNode,
+        id: index + 1,
+        node_key: `node-${index + 1}`,
+        display_name: `node-${String(index + 1).padStart(2, '0')}`
+      }))
+    )
+
+    const wrapper = mount(OpenCodeProxyPool, {
+      props: { view: 'nodes' },
+      global: { stubs: { Icon: true, BaseDialog: true, Pagination: PaginationStub } }
+    })
+    await flushPromises()
+
+    expect(wrapper.get('[data-testid="opencode-node-pagination"]').text()).toContain('1/20/21')
+    expect(wrapper.findAll('tbody tr')).toHaveLength(20)
+
+    await wrapper.get('[data-testid="pagination-next"]').trigger('click')
+    expect(wrapper.findAll('tbody tr')).toHaveLength(1)
+    expect(wrapper.text()).toContain('node-21')
+
+    await wrapper.get('[data-testid="pagination-size"]').trigger('click')
+    expect(wrapper.get('[data-testid="opencode-node-pagination"]').text()).toContain('1/10/21')
+    expect(wrapper.findAll('tbody tr')).toHaveLength(10)
+    expect(wrapper.text()).toContain('node-01')
+    expect(wrapper.text()).not.toContain('node-21')
   })
 })

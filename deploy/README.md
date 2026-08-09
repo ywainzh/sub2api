@@ -26,6 +26,7 @@ This directory contains files for deploying Sub2API on Linux servers and Apple-s
 | `sub2api.service` | Systemd service unit file |
 | `sub2api-datamanagementd.service` | datamanagementd systemd service unit file |
 | `DATAMANAGEMENTD_CN.md` | datamanagementd 部署与联动说明（中文） |
+| `lite/AGENT_RUNBOOK.md` | `release` 分支发布、阿里云生产升级与回滚的 Agent 固定流程 |
 | `config.example.yaml` | Example configuration file |
 | `EDGE_SECURITY.md` | Reverse proxy, CDN/WAF, trusted proxy, and ingress hardening guide |
 

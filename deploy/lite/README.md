@@ -2,6 +2,8 @@
 
 本手册适用于当前的阿里云服务器：`2 vCPU / 1.6 GiB RAM / 1 GiB Swap / x86_64`。服务器只拉取已发布镜像并运行 Docker Compose，绝不在服务器执行 Node、Go、pnpm、GoReleaser 或 Docker 构建。
 
+> Agent 执行发布、隔离验收、生产升级或回滚时，必须先按 [AGENT_RUNBOOK.md](AGENT_RUNBOOK.md) 的固定顺序执行。本文件其余部分用于首次部署和运维参考；两者冲突时以 Runbook 为准。
+
 | 项目 | 固定值 |
 | --- | --- |
 | 二开分支 | `release` |
@@ -106,13 +108,15 @@ redis_password=$(openssl rand -hex 32)
 jwt_secret=$(openssl rand -hex 32)
 totp_key=$(openssl rand -hex 32)
 admin_password=$(openssl rand -hex 16)
+opencode_mihomo_secret=$(openssl rand -hex 32)
 
 sudo sed -i "s#^POSTGRES_PASSWORD=.*#POSTGRES_PASSWORD=${postgres_password}#" .env
 sudo sed -i "s#^REDIS_PASSWORD=.*#REDIS_PASSWORD=${redis_password}#" .env
 sudo sed -i "s#^JWT_SECRET=.*#JWT_SECRET=${jwt_secret}#" .env
 sudo sed -i "s#^TOTP_ENCRYPTION_KEY=.*#TOTP_ENCRYPTION_KEY=${totp_key}#" .env
 sudo sed -i "s#^ADMIN_PASSWORD=.*#ADMIN_PASSWORD=${admin_password}#" .env
-unset postgres_password redis_password jwt_secret totp_key admin_password
+sudo sed -i "s#^OPENCODE_MIHOMO_SECRET=.*#OPENCODE_MIHOMO_SECRET=${opencode_mihomo_secret}#" .env
+unset postgres_password redis_password jwt_secret totp_key admin_password opencode_mihomo_secret
 
 sudo chmod 600 .env
 sudo mkdir -p data postgres_data redis_data backups
@@ -159,13 +163,15 @@ API Key: 已在后台绑定 OpenCode 池的 Sub2API Key
 
 OpenCode Zen 上游 Key 与客户端使用的 Sub2API Key 是两层凭据。池保持 Keyless 时，上游 Key 留空，Worker 不发送 `Authorization`；客户端仍必须发送自己的 Sub2API Key。生产验收使用 API Key #3“测试国产模型”。
 
-管理员配置顺序：
+管理员使用顺序：
 
-1. 在“代理管理 → OpenCode”确认订阅已同步，并对节点执行探测。
-2. 只有 `healthy`、非 429、出口 IP 唯一且探测时间不超过 15 分钟的节点会创建 Worker。
-3. 在池设置中保持启用，按需启用“服务器直连”，然后点击“立即对账”。服务器直连会采用最早的现有 `server_direct` OpenCode 账号。
-4. 在用户的 API Key 弹框中打开“追加 OpenCode”。生产只给 API Key #3 打开，Key #1、#2 保持不变。
+1. 在“IP管理 → OpenCode 订阅”添加订阅或导入 HTTP 节点，完成同步。
+2. 在“IP管理 → OpenCode 节点”执行探测；探测和 Worker 对账由系统自动完成。
+3. 只有 `healthy`、非 429 且出口 IP 唯一的节点会创建 Worker；自动维护结果有效 26 小时，管理员手动绑定时要求 15 分钟内的新探测。
+4. 在 API Key 编辑弹框中打开“追加 OpenCode”。生产只给指定验收 Key 打开，其他 Key 保持不变。
 5. 请求免费模型时自动切到系统池；非免费模型继续使用 Key 原分组。免费模型命中但池无 Worker 时返回 `503 opencode_pool_unavailable`，不会回落普通账号或服务器直连。
+
+节点维护规则：每天 `00:00`（`Asia/Shanghai`）全量探测；硬故障节点立即停用并按 `5 分钟 → 15 分钟 → 1 小时 → 6 小时`复测；连续硬故障超过 7 天只进入隔离，不自动删除。429、5xx 和重复出口不累计长期故障时间；节点只能由管理员在节点列表手动删除。
 
 基础验证：
 
@@ -324,7 +330,7 @@ curl -fsS https://sub2api.zyspeed.xyz/health
 
 在管理后台版本菜单展开“版本回退”，选择最近的固定版本即可在线回滚。Docker 回滚同样先拉取目标 GHCR 镜像，再由助手切换 `.env` 并重建 `sub2api`；不会回滚数据库内容。
 
-从 `v0.2.0` 回滚到 `v0.1.20` 前，先在后台解绑 API Key #3，停用 OpenCode 池并执行一次对账。对账会停用系统 Worker并释放出口租约，然后再切换旧镜像。迁移 195 新增的表可以保留，旧版普通 OpenAI 账号不使用这些表。
+回滚到不支持 OpenCode 自动池的旧版本前，先解绑所有“追加 OpenCode”的 API Key，再通过管理员 OpenCode 池接口停用池并执行对账；确认活动 Worker 为 0、出口租约已释放后才切换旧镜像。增量表可以保留，旧版普通 OpenAI 账号不会使用这些表。
 
 服务器无法访问后台时，也可以手工回滚镜像：
 
