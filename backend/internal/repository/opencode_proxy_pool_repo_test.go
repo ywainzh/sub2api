@@ -4,10 +4,13 @@ import (
 	"context"
 	"database/sql"
 	"encoding/json"
+	"net/http"
 	"testing"
+	"time"
 
 	"github.com/DATA-DOG/go-sqlmock"
 	"github.com/Wei-Shaw/sub2api/internal/pkg/openai_compat"
+	"github.com/Wei-Shaw/sub2api/internal/service"
 	"github.com/stretchr/testify/require"
 )
 
@@ -27,7 +30,7 @@ func TestUsedListenerPortsIncludesSoftDeletedReservations(t *testing.T) {
 	require.NoError(t, err)
 	t.Cleanup(func() { _ = db.Close() })
 
-	mock.ExpectQuery("SELECT listener_port FROM managed_proxy_nodes").
+	mock.ExpectQuery("SELECT listener_port FROM managed_proxy_nodes WHERE listener_port IS NOT NULL").
 		WillReturnRows(sqlmock.NewRows([]string{"listener_port"}).AddRow(22000).AddRow(22021))
 
 	repo := &openCodeProxyPoolRepository{db: db}
@@ -35,6 +38,76 @@ func TestUsedListenerPortsIncludesSoftDeletedReservations(t *testing.T) {
 	require.NoError(t, err)
 	require.Contains(t, ports, 22000)
 	require.Contains(t, ports, 22021)
+	require.NoError(t, mock.ExpectationsWereMet())
+}
+
+func TestOpenCodeHardProbeFailureClassification(t *testing.T) {
+	for _, failureType := range []string{"tls", "dns", "timeout", "transport", "exit_probe", "auth"} {
+		require.True(t, isOpenCodeHardProbeFailure(failureType), failureType)
+	}
+	for _, failureType := range []string{"rate_limited", "upstream_error", "duplicate_exit", "probe_infrastructure"} {
+		require.False(t, isOpenCodeHardProbeFailure(failureType), failureType)
+	}
+}
+
+func TestUpdateOpenCodeRateLimitDoesNotAdvanceHardFailureWindow(t *testing.T) {
+	db, mock, err := sqlmock.New(sqlmock.QueryMatcherOption(sqlmock.QueryMatcherRegexp))
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = db.Close() })
+	retryAt := time.Date(2026, time.August, 9, 9, 15, 0, 0, time.UTC)
+	mock.ExpectBegin()
+	mock.ExpectExec(`UPDATE managed_proxy_nodes SET`).
+		WithArgs(int64(42), "rate_limited", "", "", "", nil, http.StatusTooManyRequests,
+			"rate_limited", "", nil, false, false, retryAt).
+		WillReturnResult(sqlmock.NewResult(0, 1))
+	mock.ExpectExec(`UPDATE proxies SET status=\$2`).
+		WithArgs(int64(42), "disabled").
+		WillReturnResult(sqlmock.NewResult(0, 1))
+	mock.ExpectCommit()
+	repo := &openCodeProxyPoolRepository{db: db}
+	err = repo.UpdateNodeProbeResults(context.Background(), []service.OpenCodeNodeProbeResult{{
+		NodeID: 42, HealthStatus: "rate_limited", OpenCodeHTTPStatus: http.StatusTooManyRequests,
+		FailureType: "rate_limited", RetryAt: &retryAt,
+	}})
+	require.NoError(t, err)
+	require.NoError(t, mock.ExpectationsWereMet())
+}
+
+func TestDeleteManagedNodeCreatesTombstoneAndPhysicallyRemovesProxy(t *testing.T) {
+	db, mock, err := sqlmock.New(sqlmock.QueryMatcherOption(sqlmock.QueryMatcherRegexp))
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = db.Close() })
+	mock.ExpectBegin()
+	mock.ExpectQuery(`SELECT subscription_id, node_key, proxy_id FROM managed_proxy_nodes`).
+		WithArgs(int64(28)).
+		WillReturnRows(sqlmock.NewRows([]string{"subscription_id", "node_key", "proxy_id"}).AddRow(2, "node-key", 40))
+	mock.ExpectExec(`INSERT INTO opencode_node_tombstones`).
+		WithArgs(int64(2), "node-key", "manual").
+		WillReturnResult(sqlmock.NewResult(1, 1))
+	mock.ExpectQuery(`SELECT account_id FROM opencode_pool_workers`).
+		WithArgs(int64(28)).
+		WillReturnRows(sqlmock.NewRows([]string{"account_id"}))
+	mock.ExpectExec(`DELETE FROM opencode_egress_leases`).
+		WithArgs(sqlmock.AnyArg()).
+		WillReturnResult(sqlmock.NewResult(0, 0))
+	mock.ExpectExec(`DELETE FROM opencode_pool_workers`).
+		WithArgs(int64(28)).
+		WillReturnResult(sqlmock.NewResult(0, 0))
+	mock.ExpectExec(`UPDATE managed_proxy_nodes SET duplicate_of_node_id=NULL`).
+		WithArgs(int64(28)).
+		WillReturnResult(sqlmock.NewResult(0, 0))
+	mock.ExpectExec(`DELETE FROM managed_proxy_nodes`).
+		WithArgs(int64(28)).
+		WillReturnResult(sqlmock.NewResult(0, 1))
+	mock.ExpectExec(`DELETE FROM proxies`).
+		WithArgs(int64(40)).
+		WillReturnResult(sqlmock.NewResult(0, 1))
+	mock.ExpectExec(`UPDATE proxy_subscriptions SET node_count=`).
+		WithArgs(int64(2)).
+		WillReturnResult(sqlmock.NewResult(0, 1))
+	mock.ExpectCommit()
+	repo := &openCodeProxyPoolRepository{db: db}
+	require.NoError(t, repo.DeleteManagedNode(context.Background(), 28, "manual"))
 	require.NoError(t, mock.ExpectationsWereMet())
 }
 

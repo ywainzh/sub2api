@@ -87,6 +87,11 @@
           <Icon name="plus" size="md" class="mr-2" />
           {{ t('admin.proxies.openCode.addSubscription') }}
         </button>
+		<input ref="importFileInput" type="file" accept=".txt,text/plain" class="hidden" @change="importProxyFile" />
+		<button class="btn btn-secondary" :disabled="importing" type="button" @click="importFileInput?.click()">
+		  <Icon :name="importing ? 'refresh' : 'upload'" size="md" class="mr-2" :class="importing ? 'animate-spin' : ''" />
+		  {{ importing ? t('admin.proxies.openCode.importing') : t('admin.proxies.openCode.importNodes') }}
+		</button>
         <div class="ml-auto flex items-center gap-2 text-xs text-gray-500 dark:text-gray-400">
           <span>{{
             t('admin.proxies.openCode.freeModels', {
@@ -117,6 +122,7 @@
           <option value="unprobed">
             {{ t('admin.proxies.openCode.unprobed') }}
           </option>
+		  <option value="quarantined">{{ t('admin.proxies.openCode.quarantined') }}</option>
         </select>
         <button class="btn btn-secondary" :disabled="loading" :title="t('common.refresh')" @click="loadAll">
           <Icon name="refresh" size="md" :class="loading ? 'animate-spin' : ''" />
@@ -134,15 +140,13 @@
         </button>
         <div class="ml-auto flex items-center gap-1.5 text-xs text-gray-500 dark:text-gray-400">
           <Icon name="clock" size="sm" />
-          <span>
-            {{ t('admin.proxies.openCode.autoRecoveryHint', { minutes: pool?.probe_interval_minutes || 15 }) }}
-          </span>
+		  <span>{{ t('admin.proxies.openCode.dailyMaintenanceHint', { time: displayTime(maintenance?.next_run_at) }) }}</span>
         </div>
       </template>
     </div>
 
     <div
-      v-if="view === 'nodes' && probing"
+	  v-if="probing"
       class="border-b border-primary-200 bg-primary-50/80 px-4 py-3 text-primary-900 dark:border-primary-800 dark:bg-primary-900/20 dark:text-primary-100"
       role="status"
       aria-live="polite"
@@ -154,7 +158,7 @@
         </span>
         <div class="min-w-0">
           <p class="text-sm font-medium">
-            {{ t('admin.proxies.openCode.probeInProgress', { count: probingNodeIds.size }) }}
+			{{ activeJob ? t('admin.proxies.openCode.jobProgress', { processed: activeJob.processed_nodes, total: activeJob.total_nodes }) : t('admin.proxies.openCode.probeInProgress', { count: probingNodeIds.size }) }}
           </p>
           <p class="mt-0.5 text-xs text-primary-700 dark:text-primary-300">
             {{ t('admin.proxies.openCode.probeProgressHint', { seconds: probeElapsedSeconds }) }}
@@ -222,6 +226,7 @@
             <td class="px-4 py-3">
               <div class="flex justify-end gap-1">
                 <button
+				  v-if="subscription.source_type === 'url'"
                   class="btn btn-ghost btn-sm"
                   :disabled="syncingIds.has(subscription.id)"
                   :title="t('admin.proxies.openCode.sync')"
@@ -278,7 +283,7 @@
                 {{ node.display_name }}
               </div>
               <div class="mt-0.5 font-mono text-xs text-gray-400">
-                #{{ node.proxy_id ?? '-' }} · :{{ node.listener_port }}
+				#{{ node.proxy_id ?? '-' }} · {{ node.transport_mode === 'direct_http' ? t('admin.proxies.openCode.directHttp') : `:${node.listener_port}` }}
               </div>
             </td>
             <td class="px-4 py-3">
@@ -319,9 +324,16 @@
             </td>
             <td class="px-4 py-3 text-xs text-gray-500">
               {{ displayTime(node.last_probe_at) }}
+			  <div v-if="node.consecutive_failures > 0" class="mt-1 text-red-500">
+				{{ t('admin.proxies.openCode.failureCount', { count: node.consecutive_failures }) }}
+			  </div>
+			  <div v-if="node.retry_at" class="mt-1 text-amber-600">
+				{{ t('admin.proxies.openCode.retryAt', { time: displayTime(node.retry_at) }) }}
+			  </div>
             </td>
             <td class="px-4 py-2 text-right">
-              <button
+			  <div class="flex justify-end gap-2">
+			  <button
                 type="button"
                 class="btn btn-secondary btn-sm min-h-11"
                 :disabled="probing || !isPoolNode(node)"
@@ -338,6 +350,18 @@
                 />
                 {{ probingNodeIds.has(node.id) ? t('admin.proxies.openCode.probing') : t('admin.proxies.openCode.probe') }}
               </button>
+			  <button
+				type="button"
+				class="btn btn-danger btn-sm min-h-11"
+				:disabled="probing || deletingNodeIds.has(node.id)"
+				:title="t('admin.proxies.openCode.deleteNode')"
+				:data-testid="`opencode-delete-node-${node.id}`"
+				@click="deleteNode(node)"
+			  >
+				<Icon name="trash" size="sm" class="mr-1.5" />
+				{{ deletingNodeIds.has(node.id) ? t('common.processing') : t('common.delete') }}
+			  </button>
+			  </div>
             </td>
           </tr>
         </tbody>
@@ -367,11 +391,11 @@
         data-form-type="other"
         @submit.prevent="saveSubscription"
       >
-        <div>
+		<div>
           <label class="input-label">{{ t('admin.proxies.openCode.name') }}</label>
           <input v-model="form.name" class="input" type="text" required maxlength="100" />
         </div>
-        <div>
+		<div v-if="!editing || editing.source_type === 'url'">
           <label class="input-label">{{ t('admin.proxies.openCode.subscriptionUrl') }}</label>
           <input
             v-model="form.url"
@@ -386,7 +410,7 @@
             :placeholder="editing ? t('admin.proxies.openCode.keepUrl') : 'https://...'"
           />
         </div>
-        <div>
+		<div v-if="!editing || editing.source_type === 'url'">
           <label class="input-label">{{ t('admin.proxies.openCode.interval') }}</label>
           <input v-model.number="form.sync_interval_minutes" class="input" type="number" min="5" max="43200" required />
         </div>
@@ -415,6 +439,8 @@ import { useI18n } from 'vue-i18n'
 import { adminAPI } from '@/api/admin'
 import type {
   ManagedProxyNode,
+	OpenCodeMaintenanceJob,
+	OpenCodeMaintenanceStatus,
   OpenCodeModelRegistryStatus,
   OpenCodeNodeProbeResult,
   OpenCodePool,
@@ -437,10 +463,15 @@ const workers = ref<OpenCodePoolWorker[]>([])
 const loading = ref(false)
 const probing = ref(false)
 const probingNodeIds = ref(new Set<number>())
+	const deletingNodeIds = ref(new Set<number>())
 const probeElapsedSeconds = ref(0)
+	const activeJob = ref<OpenCodeMaintenanceJob | null>(null)
+	const maintenance = ref<OpenCodeMaintenanceStatus | null>(null)
+	const importing = ref(false)
+	const importFileInput = ref<HTMLInputElement | null>(null)
 const refreshingModels = ref(false)
 const syncingIds = ref(new Set<number>())
-type NodeHealthFilter = '' | 'healthy' | 'rate_limited' | 'duplicate_exit' | 'failed' | 'transport_error' | 'unprobed'
+type NodeHealthFilter = '' | 'healthy' | 'rate_limited' | 'duplicate_exit' | 'failed' | 'transport_error' | 'unprobed' | 'quarantined'
 const healthFilter = ref<NodeHealthFilter>('')
 const showDialog = ref(false)
 const editing = ref<ProxySubscription | null>(null)
@@ -505,7 +536,8 @@ const healthLabel = (status: string) =>
     auth_error: t('admin.proxies.openCode.authError'),
     http_error: t('admin.proxies.openCode.httpError'),
     unprobed: t('admin.proxies.openCode.unprobed'),
-    missing: t('admin.proxies.openCode.missing')
+    missing: t('admin.proxies.openCode.missing'),
+	quarantined: t('admin.proxies.openCode.quarantined')
   })[status] || status
 
 function showNodeFilter(filter: Exclude<NodeHealthFilter, '' | 'healthy' | 'transport_error' | 'unprobed'>) {
@@ -523,6 +555,7 @@ const workerLabel = (status: string) =>
 
 let probeStartedAt = 0
 let probeElapsedTimer: number | undefined
+let disposed = false
 
 function startProbeProgress(nodeIds: number[]) {
   if (probeElapsedTimer !== undefined) window.clearInterval(probeElapsedTimer)
@@ -565,14 +598,16 @@ function summarizeProbeResults(results: OpenCodeNodeProbeResult[]) {
 async function loadAll() {
   loading.value = true
   try {
-    const [subscriptionItems, poolStatus, poolWorkers] = await Promise.all([
+	const [subscriptionItems, poolStatus, poolWorkers, maintenanceStatus] = await Promise.all([
       adminAPI.proxies.listSubscriptions(),
       adminAPI.proxies.getOpenCodePool(),
-      adminAPI.proxies.listOpenCodePoolWorkers()
+	  adminAPI.proxies.listOpenCodePoolWorkers(),
+	  adminAPI.proxies.getOpenCodeMaintenance()
     ])
     subscriptions.value = subscriptionItems
     pool.value = poolStatus
     workers.value = poolWorkers
+	maintenance.value = maintenanceStatus
     if (props.view === 'nodes') {
       const batches = await Promise.all(
         subscriptions.value.map((item) => adminAPI.proxies.listSubscriptionNodes(item.id))
@@ -731,12 +766,99 @@ async function runProbe(nodeIds: number[]) {
 }
 
 async function probeNodes() {
-  await runProbe(probeableNodes.value.map((node) => node.id))
+	if (probing.value || probeableNodes.value.length === 0) return
+	probing.value = true
+	startProbeProgress(probeableNodes.value.map((node) => node.id))
+	try {
+		activeJob.value = await adminAPI.proxies.createOpenCodeProbeJob(probeableNodes.value.map((node) => node.id))
+		await pollMaintenanceJob(activeJob.value.id)
+	} catch (error) {
+		appStore.showError(errorMessage(error))
+	} finally {
+		stopProbeProgress()
+		probing.value = false
+		activeJob.value = null
+	}
 }
 
 async function probeNode(node: ManagedProxyNode) {
   if (!isPoolNode(node)) return
   await runProbe([node.id])
+}
+
+async function pollMaintenanceJob(jobId: number) {
+  while (true) {
+	if (disposed) return
+		const job = await adminAPI.proxies.getOpenCodeMaintenanceJob(jobId)
+		activeJob.value = job
+		if (job.status === 'completed' || job.status === 'failed') {
+			await loadAll()
+			if (job.status === 'failed') throw new Error(job.error_message || t('admin.proxies.openCode.jobFailed'))
+			appStore.showSuccess(t('admin.proxies.openCode.jobCompleted', {
+				healthy: job.healthy_nodes,
+				failed: job.failed_nodes,
+				rateLimited: job.rate_limited_nodes,
+				duplicate: job.duplicate_nodes
+			}), 6000)
+			return
+		}
+		await new Promise((resolve) => window.setTimeout(resolve, 2000))
+	}
+}
+
+async function initialLoad() {
+	await loadAll()
+	const latest = maintenance.value?.latest_job
+	if (!latest || (latest.status !== 'pending' && latest.status !== 'running')) return
+	probing.value = true
+	activeJob.value = latest
+	startProbeProgress([])
+	try {
+		await pollMaintenanceJob(latest.id)
+	} catch (error) {
+		appStore.showError(errorMessage(error))
+	} finally {
+		probing.value = false
+		activeJob.value = null
+		stopProbeProgress()
+	}
+}
+
+async function importProxyFile(event: Event) {
+	const input = event.target as HTMLInputElement
+	const file = input.files?.[0]
+	if (!file || importing.value) return
+	importing.value = true
+	probing.value = true
+	startProbeProgress([])
+	try {
+		activeJob.value = await adminAPI.proxies.importOpenCodeProxies(file)
+		await pollMaintenanceJob(activeJob.value.id)
+	} catch (error) {
+		appStore.showError(errorMessage(error))
+	} finally {
+		input.value = ''
+		importing.value = false
+		probing.value = false
+		activeJob.value = null
+		stopProbeProgress()
+	}
+}
+
+async function deleteNode(node: ManagedProxyNode) {
+	if (!window.confirm(t('admin.proxies.openCode.deleteNodeConfirm', { name: node.display_name }))) return
+	deletingNodeIds.value = new Set(deletingNodeIds.value).add(node.id)
+	try {
+		await adminAPI.proxies.deleteOpenCodeManagedNode(node.id)
+		appStore.showSuccess(t('admin.proxies.openCode.nodeDeleted'))
+		await loadAll()
+	} catch (error) {
+		appStore.showError(errorMessage(error))
+	} finally {
+		const next = new Set(deletingNodeIds.value)
+		next.delete(node.id)
+		deletingNodeIds.value = next
+	}
 }
 
 async function refreshModels() {
@@ -751,6 +873,9 @@ async function refreshModels() {
 }
 
 watch(() => props.view, loadAll)
-onMounted(loadAll)
-onUnmounted(stopProbeProgress)
+onMounted(initialLoad)
+onUnmounted(() => {
+	disposed = true
+	stopProbeProgress()
+})
 </script>

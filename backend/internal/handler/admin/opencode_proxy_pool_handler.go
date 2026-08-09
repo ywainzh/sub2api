@@ -3,7 +3,9 @@ package admin
 import (
 	"context"
 	"errors"
+	"io"
 	"net/http"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"time"
@@ -15,6 +17,7 @@ import (
 )
 
 const openCodeAdminOperationTimeout = 10 * time.Minute
+const openCodeProxyImportMaxBytes = int64(2 << 20)
 
 // Long-running subscription and probe operations must finish persisting their
 // results even if the browser or a reverse proxy closes the HTTP request. The
@@ -61,6 +64,8 @@ func (h *ProxyHandler) requireOpenCodeProxyPool(c *gin.Context) *service.OpenCod
 func writeOpenCodeProxyPoolError(c *gin.Context, err error) {
 	switch {
 	case errors.Is(err, service.ErrProxySubscriptionNotFound):
+		response.NotFound(c, err.Error())
+	case errors.Is(err, service.ErrManagedProxyNodeNotFound):
 		response.NotFound(c, err.Error())
 	case errors.Is(err, service.ErrProxySubscriptionInUse), errors.Is(err, service.ErrOpenCodeDuplicateExitIP):
 		response.Error(c, http.StatusConflict, err.Error())
@@ -206,6 +211,110 @@ func (h *ProxyHandler) ProbeOpenCodeProxies(c *gin.Context) {
 		return
 	}
 	response.Success(c, items)
+}
+
+func (h *ProxyHandler) CreateOpenCodeProbeJob(c *gin.Context) {
+	pool := h.requireOpenCodeProxyPool(c)
+	if pool == nil {
+		return
+	}
+	var req probeOpenCodeNodesRequest
+	if c.Request.ContentLength > 0 {
+		if err := c.ShouldBindJSON(&req); err != nil {
+			response.BadRequest(c, "Invalid request: "+err.Error())
+			return
+		}
+	}
+	job, err := pool.StartProbeJob(c.Request.Context(), req.NodeIDs, "manual", "")
+	if err != nil {
+		writeOpenCodeProxyPoolError(c, err)
+		return
+	}
+	response.Created(c, job)
+}
+
+func (h *ProxyHandler) ImportOpenCodeProxies(c *gin.Context) {
+	pool := h.requireOpenCodeProxyPool(c)
+	if pool == nil {
+		return
+	}
+	c.Request.Body = http.MaxBytesReader(c.Writer, c.Request.Body, openCodeProxyImportMaxBytes+(1<<20))
+	fileHeader, err := c.FormFile("file")
+	if err != nil {
+		response.BadRequest(c, "A proxy file is required")
+		return
+	}
+	file, err := fileHeader.Open()
+	if err != nil {
+		response.BadRequest(c, "Unable to open proxy file")
+		return
+	}
+	defer func() { _ = file.Close() }()
+	data, err := io.ReadAll(io.LimitReader(file, openCodeProxyImportMaxBytes+1))
+	if err != nil || int64(len(data)) > openCodeProxyImportMaxBytes {
+		response.BadRequest(c, "Proxy file must not exceed 2MB")
+		return
+	}
+	sourceName := strings.TrimSpace(c.PostForm("name"))
+	if sourceName == "" {
+		sourceName = strings.TrimSuffix(filepath.Base(fileHeader.Filename), filepath.Ext(fileHeader.Filename))
+	}
+	job, err := pool.StartProxyImport(c.Request.Context(), sourceName, data)
+	if err != nil {
+		response.BadRequest(c, err.Error())
+		return
+	}
+	response.Created(c, job)
+}
+
+func (h *ProxyHandler) GetOpenCodeMaintenanceJob(c *gin.Context) {
+	pool := h.requireOpenCodeProxyPool(c)
+	if pool == nil {
+		return
+	}
+	id, err := strconv.ParseInt(c.Param("id"), 10, 64)
+	if err != nil || id <= 0 {
+		response.BadRequest(c, "Invalid job ID")
+		return
+	}
+	job, err := pool.GetMaintenanceJob(c.Request.Context(), id)
+	if err != nil {
+		writeOpenCodeProxyPoolError(c, err)
+		return
+	}
+	response.Success(c, job)
+}
+
+func (h *ProxyHandler) GetOpenCodeMaintenance(c *gin.Context) {
+	pool := h.requireOpenCodeProxyPool(c)
+	if pool == nil {
+		return
+	}
+	status, err := pool.GetMaintenanceStatus(c.Request.Context())
+	if err != nil {
+		writeOpenCodeProxyPoolError(c, err)
+		return
+	}
+	response.Success(c, status)
+}
+
+func (h *ProxyHandler) DeleteOpenCodeManagedNode(c *gin.Context) {
+	pool := h.requireOpenCodeProxyPool(c)
+	if pool == nil {
+		return
+	}
+	id, err := strconv.ParseInt(c.Param("id"), 10, 64)
+	if err != nil || id <= 0 {
+		response.BadRequest(c, "Invalid node ID")
+		return
+	}
+	operationCtx, cancel := openCodeAdminOperationContext(c.Request.Context())
+	defer cancel()
+	if err := pool.DeleteManagedNode(operationCtx, id); err != nil {
+		writeOpenCodeProxyPoolError(c, err)
+		return
+	}
+	response.Success(c, gin.H{"message": "Managed OpenCode node deleted"})
 }
 
 func (h *ProxyHandler) GetOpenCodeModels(c *gin.Context) {

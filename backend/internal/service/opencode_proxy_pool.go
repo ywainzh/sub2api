@@ -12,6 +12,7 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
+	"net"
 	"net/http"
 	"net/netip"
 	"net/url"
@@ -35,6 +36,7 @@ const (
 	openCodeSubscriptionMaxBytes    = int64(8 << 20)
 	openCodeProbeTimeout            = 20 * time.Second
 	openCodeNodeProbeFreshness      = 15 * time.Minute
+	openCodeWorkerProbeValidity     = 26 * time.Hour
 	openCodeDefaultSyncInterval     = 360
 	openCodeListenerPortStart       = 22000
 	openCodeListenerPortEnd         = 29999
@@ -43,6 +45,7 @@ const (
 var (
 	ErrProxySubscriptionNotFound = infraerrors.NotFound("PROXY_SUBSCRIPTION_NOT_FOUND", "proxy subscription not found")
 	ErrProxySubscriptionInUse    = infraerrors.Conflict("PROXY_SUBSCRIPTION_IN_USE", "proxy subscription has nodes bound to accounts")
+	ErrManagedProxyNodeNotFound  = infraerrors.NotFound("MANAGED_PROXY_NODE_NOT_FOUND", "managed OpenCode proxy node not found")
 	ErrOpenCodeDuplicateExitIP   = infraerrors.Conflict("OPENCODE_DUPLICATE_EXIT_IP", "OpenCode exit IP is already leased")
 	ErrOpenCodeProxyRequired     = infraerrors.BadRequest("OPENCODE_PROXY_REQUIRED", "OpenCode proxy egress requires a managed proxy")
 	ErrOpenCodeProxyUnhealthy    = infraerrors.Conflict("OPENCODE_PROXY_UNHEALTHY", "OpenCode managed proxy is not healthy")
@@ -67,32 +70,42 @@ type ProxySubscription struct {
 	CreatedAt           time.Time  `json:"created_at"`
 	UpdatedAt           time.Time  `json:"updated_at"`
 	URLCiphertext       string     `json:"-"`
+	SourceType          string     `json:"source_type"`
 }
 
 type ManagedProxyNode struct {
-	ID                 int64      `json:"id"`
-	SubscriptionID     int64      `json:"subscription_id"`
-	ProxyID            *int64     `json:"proxy_id"`
-	NodeKey            string     `json:"node_key"`
-	DisplayName        string     `json:"display_name"`
-	MihomoName         string     `json:"mihomo_name"`
-	Protocol           string     `json:"protocol"`
-	ListenerPort       int        `json:"listener_port"`
-	SyncStatus         string     `json:"sync_status"`
-	HealthStatus       string     `json:"health_status"`
-	LastSeenAt         *time.Time `json:"last_seen_at"`
-	ExitIP             string     `json:"exit_ip,omitempty"`
-	Country            string     `json:"country,omitempty"`
-	Region             string     `json:"region,omitempty"`
-	LatencyMs          *int64     `json:"latency_ms"`
-	OpenCodeHTTPStatus *int       `json:"opencode_http_status"`
-	FailureType        string     `json:"failure_type,omitempty"`
-	FailureMessage     string     `json:"failure_message,omitempty"`
-	LastProbeAt        *time.Time `json:"last_probe_at"`
-	DuplicateOfNodeID  *int64     `json:"duplicate_of_node_id"`
-	ListenerUsername   string     `json:"-"`
-	ListenerPassword   string     `json:"-"`
-	ConfigCiphertext   string     `json:"-"`
+	ID                    int64      `json:"id"`
+	SubscriptionID        int64      `json:"subscription_id"`
+	ProxyID               *int64     `json:"proxy_id"`
+	NodeKey               string     `json:"node_key"`
+	DisplayName           string     `json:"display_name"`
+	MihomoName            string     `json:"mihomo_name"`
+	Protocol              string     `json:"protocol"`
+	ListenerPort          int        `json:"listener_port"`
+	TransportMode         string     `json:"transport_mode"`
+	SyncStatus            string     `json:"sync_status"`
+	HealthStatus          string     `json:"health_status"`
+	LastSeenAt            *time.Time `json:"last_seen_at"`
+	ExitIP                string     `json:"exit_ip,omitempty"`
+	Country               string     `json:"country,omitempty"`
+	Region                string     `json:"region,omitempty"`
+	LatencyMs             *int64     `json:"latency_ms"`
+	OpenCodeHTTPStatus    *int       `json:"opencode_http_status"`
+	FailureType           string     `json:"failure_type,omitempty"`
+	FailureMessage        string     `json:"failure_message,omitempty"`
+	LastProbeAt           *time.Time `json:"last_probe_at"`
+	DuplicateOfNodeID     *int64     `json:"duplicate_of_node_id"`
+	UnavailableSince      *time.Time `json:"unavailable_since"`
+	LastSuccessfulProbeAt *time.Time `json:"last_successful_probe_at"`
+	ConsecutiveFailures   int        `json:"consecutive_failures"`
+	RetryAt               *time.Time `json:"retry_at"`
+	RetryCount            int        `json:"retry_count"`
+	ListenerUsername      string     `json:"-"`
+	ListenerPassword      string     `json:"-"`
+	ProxyProtocol         string     `json:"-"`
+	ProxyHost             string     `json:"-"`
+	ProxyPort             int        `json:"-"`
+	ConfigCiphertext      string     `json:"-"`
 }
 
 type ManagedProxyNodeDraft struct {
@@ -101,17 +114,44 @@ type ManagedProxyNodeDraft struct {
 }
 
 type OpenCodeNodeProbeResult struct {
-	NodeID             int64  `json:"node_id"`
-	Success            bool   `json:"success"`
-	HealthStatus       string `json:"health_status"`
-	ExitIP             string `json:"exit_ip,omitempty"`
-	Country            string `json:"country,omitempty"`
-	Region             string `json:"region,omitempty"`
-	LatencyMs          int64  `json:"latency_ms,omitempty"`
-	OpenCodeHTTPStatus int    `json:"opencode_http_status,omitempty"`
-	FailureType        string `json:"failure_type,omitempty"`
-	FailureMessage     string `json:"failure_message,omitempty"`
-	DuplicateOfNodeID  *int64 `json:"duplicate_of_node_id,omitempty"`
+	NodeID             int64      `json:"node_id"`
+	Success            bool       `json:"success"`
+	HealthStatus       string     `json:"health_status"`
+	ExitIP             string     `json:"exit_ip,omitempty"`
+	Country            string     `json:"country,omitempty"`
+	Region             string     `json:"region,omitempty"`
+	LatencyMs          int64      `json:"latency_ms,omitempty"`
+	OpenCodeHTTPStatus int        `json:"opencode_http_status,omitempty"`
+	FailureType        string     `json:"failure_type,omitempty"`
+	FailureMessage     string     `json:"failure_message,omitempty"`
+	DuplicateOfNodeID  *int64     `json:"duplicate_of_node_id,omitempty"`
+	RetryAt            *time.Time `json:"retry_at,omitempty"`
+}
+
+type OpenCodeMaintenanceJob struct {
+	ID               int64      `json:"id"`
+	JobType          string     `json:"job_type"`
+	TriggerType      string     `json:"trigger_type"`
+	Status           string     `json:"status"`
+	SourceName       string     `json:"source_name,omitempty"`
+	SubscriptionID   *int64     `json:"subscription_id,omitempty"`
+	TotalNodes       int        `json:"total_nodes"`
+	ProcessedNodes   int        `json:"processed_nodes"`
+	HealthyNodes     int        `json:"healthy_nodes"`
+	FailedNodes      int        `json:"failed_nodes"`
+	RateLimitedNodes int        `json:"rate_limited_nodes"`
+	DuplicateNodes   int        `json:"duplicate_nodes"`
+	DeletedNodes     int        `json:"deleted_nodes"`
+	ErrorMessage     string     `json:"error_message,omitempty"`
+	StartedAt        *time.Time `json:"started_at,omitempty"`
+	FinishedAt       *time.Time `json:"finished_at,omitempty"`
+	CreatedAt        time.Time  `json:"created_at"`
+	UpdatedAt        time.Time  `json:"updated_at"`
+}
+
+type OpenCodeMaintenanceStatus struct {
+	NextRunAt *time.Time              `json:"next_run_at,omitempty"`
+	LatestJob *OpenCodeMaintenanceJob `json:"latest_job,omitempty"`
 }
 
 type OpenCodeModelRegistryStatus struct {
@@ -190,6 +230,16 @@ type OpenCodeProxyPoolRepository interface {
 	CommitSubscriptionSync(context.Context, int64, []ManagedProxyNodeDraft, string, string) error
 	UpdateSubscriptionError(context.Context, int64, string) error
 	UpdateNodeProbeResults(context.Context, []OpenCodeNodeProbeResult) error
+	CreateMaintenanceJob(context.Context, OpenCodeMaintenanceJob, string) (*OpenCodeMaintenanceJob, error)
+	ClaimMaintenanceJob(context.Context, int64) (bool, error)
+	UpdateMaintenanceJob(context.Context, OpenCodeMaintenanceJob) error
+	GetMaintenanceJob(context.Context, int64) (*OpenCodeMaintenanceJob, error)
+	GetLatestMaintenanceJob(context.Context) (*OpenCodeMaintenanceJob, error)
+	ListRetryableNodeIDs(context.Context, time.Time, int) ([]int64, error)
+	CreateUploadedSubscription(context.Context, string) (*ProxySubscription, error)
+	CommitUploadedNodes(context.Context, int64, []ManagedProxyNodeDraft) error
+	DeleteManagedNode(context.Context, int64, string) error
+	ListTombstonedNodeKeys(context.Context, int64) (map[string]struct{}, error)
 	ReconcileEgressLeases(context.Context) ([]int64, error)
 	IsManagedProxy(context.Context, int64) (bool, error)
 	AcquireEgressLease(context.Context, int64, *int64, string, string, time.Time) error
@@ -223,8 +273,13 @@ type OpenCodeProxyPoolService struct {
 	modelStatus          OpenCodeModelRegistryStatus
 	poolMu               sync.RWMutex
 	poolStatus           *OpenCodePool
+	probeMu              sync.Mutex
+	retryMu              sync.Mutex
+	retryRunning         bool
 	stop                 chan struct{}
 	stopOnce             sync.Once
+	nextMaintenanceMu    sync.RWMutex
+	nextMaintenanceAt    time.Time
 }
 
 func NewOpenCodeProxyPoolService(repo OpenCodeProxyPoolRepository, encryptor SecretEncryptor, settingRepo SettingRepository, accountRepo AccountRepository, deps ...any) *OpenCodeProxyPoolService {
@@ -275,21 +330,25 @@ func (s *OpenCodeProxyPoolService) Start() {
 		_, _ = s.RefreshModels(refreshCtx)
 		refreshCancel()
 		modelTicker := time.NewTicker(6 * time.Hour)
-		probeTicker := time.NewTicker(openCodeNodeProbeFreshness)
 		syncTicker := time.NewTicker(time.Minute)
+		retryTicker := time.NewTicker(time.Minute)
+		maintenanceTimer := time.NewTimer(time.Until(s.setNextMaintenanceRun(time.Now())))
 		defer modelTicker.Stop()
-		defer probeTicker.Stop()
 		defer syncTicker.Stop()
+		defer retryTicker.Stop()
+		defer maintenanceTimer.Stop()
 		for {
 			select {
 			case <-modelTicker.C:
 				ctx, cancel := context.WithTimeout(context.Background(), time.Minute)
 				_, _ = s.RefreshModels(ctx)
 				cancel()
-			case <-probeTicker.C:
-				ctx, cancel := context.WithTimeout(context.Background(), 10*time.Minute)
-				_, _ = s.ProbeNodes(ctx, nil)
-				cancel()
+			case <-maintenanceTimer.C:
+				now := time.Now()
+				_, _ = s.StartProbeJob(context.Background(), nil, "scheduled", "daily-"+now.Format("2006-01-02"))
+				maintenanceTimer.Reset(time.Until(s.setNextMaintenanceRun(now.Add(time.Minute))))
+			case <-retryTicker.C:
+				s.startRetryProbes()
 			case <-syncTicker.C:
 				ctx, cancel := context.WithTimeout(context.Background(), 10*time.Minute)
 				s.SyncDueSubscriptions(ctx)
@@ -309,7 +368,7 @@ func (s *OpenCodeProxyPoolService) SyncDueSubscriptions(ctx context.Context) {
 	}
 	now := time.Now()
 	for _, subscription := range subscriptions {
-		if !subscription.Enabled {
+		if !subscription.Enabled || subscription.SourceType != "url" {
 			continue
 		}
 		interval := time.Duration(subscription.SyncIntervalMinutes) * time.Minute
@@ -350,6 +409,10 @@ func (s *OpenCodeProxyPoolService) ListSubscriptions(ctx context.Context) ([]Pro
 	for i := range subscriptions {
 		subscriptions[i].HasURL = subscriptions[i].URLCiphertext != ""
 		subscriptions[i].URLMasked = "***"
+		if subscriptions[i].SourceType == "upload" {
+			subscriptions[i].URLMasked = "uploaded file"
+			continue
+		}
 		if rawURL, decryptErr := s.encryptor.Decrypt(subscriptions[i].URLCiphertext); decryptErr == nil {
 			subscriptions[i].URLMasked = maskSubscriptionURL(rawURL)
 		}
@@ -373,7 +436,7 @@ func (s *OpenCodeProxyPoolService) CreateSubscription(ctx context.Context, name,
 	if err != nil {
 		return nil, fmt.Errorf("encrypt subscription URL: %w", err)
 	}
-	return s.repo.CreateSubscription(ctx, ProxySubscription{Name: name, URLCiphertext: ciphertext, Enabled: enabled, SyncIntervalMinutes: interval, HasURL: true, URLMasked: maskSubscriptionURL(rawURL)})
+	return s.repo.CreateSubscription(ctx, ProxySubscription{Name: name, URLCiphertext: ciphertext, Enabled: enabled, SyncIntervalMinutes: interval, HasURL: true, URLMasked: maskSubscriptionURL(rawURL), SourceType: "url"})
 }
 
 func (s *OpenCodeProxyPoolService) UpdateSubscription(ctx context.Context, id int64, name string, rawURL *string, enabled bool, interval int) (*ProxySubscription, error) {
@@ -390,6 +453,9 @@ func (s *OpenCodeProxyPoolService) UpdateSubscription(ctx context.Context, id in
 		existing.SyncIntervalMinutes = interval
 	}
 	if rawURL != nil && strings.TrimSpace(*rawURL) != "" {
+		if existing.SourceType == "upload" {
+			return nil, errors.New("uploaded proxy sources do not have a subscription URL")
+		}
 		parsed, parseErr := url.Parse(strings.TrimSpace(*rawURL))
 		if parseErr != nil || (parsed.Scheme != "https" && parsed.Scheme != "http") || parsed.Host == "" {
 			return nil, errors.New("subscription URL must be an absolute HTTP(S) URL")
@@ -761,6 +827,10 @@ func (s *OpenCodeProxyPoolService) SyncSubscription(ctx context.Context, id int6
 	if err != nil {
 		return nil, err
 	}
+	tombstones, err := s.repo.ListTombstonedNodeKeys(ctx, id)
+	if err != nil {
+		return nil, err
+	}
 	drafts := make([]ManagedProxyNodeDraft, 0, len(proxies))
 	seenKeys := make(map[string]struct{}, len(proxies))
 	for index, proxyConfig := range proxies {
@@ -776,6 +846,9 @@ func (s *OpenCodeProxyPoolService) SyncSubscription(ctx context.Context, id int6
 		if _, duplicate := seenKeys[key]; duplicate {
 			continue
 		}
+		if _, deleted := tombstones[key]; deleted {
+			continue
+		}
 		seenKeys[key] = struct{}{}
 		ciphertext, encErr := s.encryptor.Encrypt(string(canonical))
 		if encErr != nil {
@@ -786,13 +859,21 @@ func (s *OpenCodeProxyPoolService) SyncSubscription(ctx context.Context, id int6
 		node.NodeKey = key
 		node.DisplayName = name
 		node.Protocol = protocol
+		if protocol == "http" || protocol == "https" {
+			node.TransportMode = "direct_http"
+			node.ListenerPort = 0
+			node.ListenerUsername = strings.TrimSpace(fmt.Sprint(proxyConfig["username"]))
+			node.ListenerPassword = strings.TrimSpace(fmt.Sprint(proxyConfig["password"]))
+		} else {
+			node.TransportMode = "mihomo_listener"
+		}
 		node.ConfigCiphertext = ciphertext
 		node.SyncStatus = "active"
 		if node.MihomoName == "" {
 			node.MihomoName = fmt.Sprintf("oc-%d-%03d-%s", id, index+1, key[:8])
 		}
 		proxyConfig["name"] = node.MihomoName
-		if node.ListenerPort == 0 {
+		if node.TransportMode == "mihomo_listener" && node.ListenerPort == 0 {
 			node.ListenerPort, err = nextListenerPort(used)
 			if err != nil {
 				return nil, err
@@ -894,6 +975,9 @@ func (s *OpenCodeProxyPoolService) reloadMihomo(ctx context.Context, drafts []Ma
 	proxies := make([]map[string]any, 0, len(drafts))
 	listeners := make([]map[string]any, 0, len(drafts))
 	for _, draft := range drafts {
+		if draft.TransportMode == "direct_http" {
+			continue
+		}
 		proxies = append(proxies, draft.ProxyConfig)
 		listeners = append(listeners, map[string]any{
 			"name": "listener-" + draft.NodeKey[:12], "type": "mixed", "port": draft.ListenerPort,
@@ -981,6 +1065,16 @@ func classifyProbeError(err error) string {
 }
 
 func (s *OpenCodeProxyPoolService) ProbeNodes(ctx context.Context, ids []int64) ([]OpenCodeNodeProbeResult, error) {
+	return s.probeNodes(ctx, ids, 3)
+}
+
+func (s *OpenCodeProxyPoolService) probeNodes(ctx context.Context, ids []int64, concurrency int) ([]OpenCodeNodeProbeResult, error) {
+	return s.probeNodesWithProgress(ctx, ids, concurrency, nil)
+}
+
+func (s *OpenCodeProxyPoolService) probeNodesWithProgress(ctx context.Context, ids []int64, concurrency int, progress func(int)) ([]OpenCodeNodeProbeResult, error) {
+	s.probeMu.Lock()
+	defer s.probeMu.Unlock()
 	nodes, err := s.repo.ListNodes(ctx, nil)
 	if err != nil {
 		return nil, err
@@ -1002,7 +1096,10 @@ func (s *OpenCodeProxyPoolService) ProbeNodes(ctx context.Context, ids []int64) 
 		}
 	}
 	results := make([]OpenCodeNodeProbeResult, 0, len(nodes))
-	sem := make(chan struct{}, 3)
+	if concurrency <= 0 {
+		concurrency = 3
+	}
+	sem := make(chan struct{}, concurrency)
 	var mu sync.Mutex
 	var wg sync.WaitGroup
 	for _, node := range nodes {
@@ -1025,11 +1122,31 @@ func (s *OpenCodeProxyPoolService) ProbeNodes(ctx context.Context, ids []int64) 
 			result := s.probeNode(ctx, node)
 			mu.Lock()
 			results = append(results, result)
+			processed := len(results)
 			mu.Unlock()
+			if progress != nil {
+				progress(processed)
+			}
 		}()
 	}
 	wg.Wait()
 	sort.Slice(results, func(i, j int) bool { return results[i].NodeID < results[j].NodeID })
+	if len(results) >= 20 {
+		exitProbeFailures := 0
+		for i := range results {
+			if results[i].FailureType == "exit_probe" {
+				exitProbeFailures++
+			}
+		}
+		if exitProbeFailures*100/len(results) >= 80 {
+			for i := range results {
+				if results[i].FailureType == "exit_probe" {
+					results[i].HealthStatus = "probe_infrastructure_error"
+					results[i].FailureType = "probe_infrastructure"
+				}
+			}
+		}
+	}
 	resultNodeIDs := make(map[int64]struct{}, len(results))
 	for _, result := range results {
 		resultNodeIDs[result.NodeID] = struct{}{}
@@ -1160,29 +1277,16 @@ func (s *OpenCodeProxyPoolService) IsManagedProxy(ctx context.Context, proxyID i
 
 func (s *OpenCodeProxyPoolService) probeDirect(ctx context.Context) OpenCodeNodeProbeResult {
 	result := OpenCodeNodeProbeResult{HealthStatus: "transport_error"}
-	client := &http.Client{Transport: &http.Transport{Proxy: nil}, Timeout: openCodeProbeTimeout}
+	transport := &http.Transport{Proxy: nil}
+	defer transport.CloseIdleConnections()
+	client := &http.Client{Transport: transport, Timeout: openCodeProbeTimeout}
 	start := time.Now()
-	exitReq, _ := http.NewRequestWithContext(ctx, http.MethodGet, "https://api64.ipify.org?format=json", nil)
-	exitResp, err := client.Do(exitReq)
+	exitIP, err := probeOpenCodeExitIP(ctx, client)
 	if err != nil {
-		result.FailureType, result.FailureMessage = classifyProbeError(err), err.Error()
+		result.FailureType, result.FailureMessage = "exit_probe", err.Error()
 		return result
 	}
-	var exitPayload struct {
-		IP string `json:"ip"`
-	}
-	decodeErr := json.NewDecoder(io.LimitReader(exitResp.Body, 4096)).Decode(&exitPayload)
-	_ = exitResp.Body.Close()
-	if decodeErr != nil || exitResp.StatusCode != http.StatusOK {
-		result.FailureType = "exit_probe"
-		return result
-	}
-	addr, err := netip.ParseAddr(strings.TrimSpace(exitPayload.IP))
-	if err != nil {
-		result.FailureType = "exit_probe"
-		return result
-	}
-	result.ExitIP = addr.Unmap().String()
+	result.ExitIP = exitIP
 	populateOpenCodeGeo(ctx, client, &result)
 	body := []byte(`{"model":"big-pickle","messages":[{"role":"user","content":"Reply OK"}],"stream":false,"max_tokens":8}`)
 	req, _ := http.NewRequestWithContext(ctx, http.MethodPost, OpenCodeZenBaseURL+"/chat/completions", bytes.NewReader(body))
@@ -1209,33 +1313,34 @@ func (s *OpenCodeProxyPoolService) probeDirect(ctx context.Context) OpenCodeNode
 	return result
 }
 
+func sanitizeOpenCodeProbeFailure(message string, secrets ...string) string {
+	for _, secret := range secrets {
+		if secret != "" {
+			message = strings.ReplaceAll(message, secret, "***")
+		}
+	}
+	return message
+}
+
 func (s *OpenCodeProxyPoolService) probeNode(ctx context.Context, node ManagedProxyNode) OpenCodeNodeProbeResult {
 	result := OpenCodeNodeProbeResult{NodeID: node.ID, HealthStatus: "transport_error"}
 	proxyURL := &url.URL{Scheme: "http", Host: fmt.Sprintf("%s:%d", s.proxyHost, node.ListenerPort), User: url.UserPassword(node.ListenerUsername, node.ListenerPassword)}
+	if node.TransportMode == "direct_http" {
+		proxyURL = &url.URL{Scheme: node.ProxyProtocol, Host: net.JoinHostPort(node.ProxyHost, strconv.Itoa(node.ProxyPort))}
+		if node.ListenerUsername != "" {
+			proxyURL.User = url.UserPassword(node.ListenerUsername, node.ListenerPassword)
+		}
+	}
 	transport := &http.Transport{Proxy: http.ProxyURL(proxyURL)}
+	defer transport.CloseIdleConnections()
 	client := &http.Client{Transport: transport, Timeout: openCodeProbeTimeout}
 	start := time.Now()
-	exitReq, _ := http.NewRequestWithContext(ctx, http.MethodGet, "https://api64.ipify.org?format=json", nil)
-	exitResp, err := client.Do(exitReq)
+	exitIP, err := probeOpenCodeExitIP(ctx, client)
 	if err != nil {
-		result.FailureType, result.FailureMessage = classifyProbeError(err), err.Error()
+		result.FailureType, result.FailureMessage = "exit_probe", err.Error()
 		return result
 	}
-	var exitPayload struct {
-		IP string `json:"ip"`
-	}
-	decodeErr := json.NewDecoder(io.LimitReader(exitResp.Body, 4096)).Decode(&exitPayload)
-	_ = exitResp.Body.Close()
-	if decodeErr != nil || exitResp.StatusCode != http.StatusOK {
-		result.FailureType, result.FailureMessage = "exit_probe", fmt.Sprintf("exit probe HTTP %d", exitResp.StatusCode)
-		return result
-	}
-	addr, parseErr := netip.ParseAddr(strings.TrimSpace(exitPayload.IP))
-	if parseErr != nil {
-		result.FailureType, result.FailureMessage = "exit_probe", "exit probe returned an invalid IP"
-		return result
-	}
-	result.ExitIP = addr.Unmap().String()
+	result.ExitIP = exitIP
 	populateOpenCodeGeo(ctx, client, &result)
 	body := []byte(`{"model":"big-pickle","messages":[{"role":"user","content":"Reply OK"}],"stream":false,"max_tokens":8}`)
 	req, _ := http.NewRequestWithContext(ctx, http.MethodPost, OpenCodeZenBaseURL+"/chat/completions", bytes.NewReader(body))
@@ -1244,10 +1349,12 @@ func (s *OpenCodeProxyPoolService) probeNode(ctx context.Context, node ManagedPr
 	resp, err := client.Do(req)
 	result.LatencyMs = time.Since(start).Milliseconds()
 	if err != nil {
-		result.FailureType, result.FailureMessage = classifyProbeError(err), err.Error()
+		result.FailureType = classifyProbeError(err)
+		result.FailureMessage = sanitizeOpenCodeProbeFailure(err.Error(), node.ListenerUsername, node.ListenerPassword)
 		return result
 	}
 	result.OpenCodeHTTPStatus = resp.StatusCode
+	result.RetryAt = openCodeRetryAt(resp, time.Now())
 	_, _ = io.Copy(io.Discard, io.LimitReader(resp.Body, 64<<10))
 	_ = resp.Body.Close()
 	switch resp.StatusCode {
@@ -1257,10 +1364,82 @@ func (s *OpenCodeProxyPoolService) probeNode(ctx context.Context, node ManagedPr
 		result.HealthStatus, result.FailureType = "rate_limited", "rate_limited"
 	case http.StatusUnauthorized, http.StatusForbidden:
 		result.HealthStatus, result.FailureType = "auth_error", "auth"
+	case http.StatusInternalServerError, http.StatusBadGateway, http.StatusServiceUnavailable, http.StatusGatewayTimeout:
+		result.HealthStatus, result.FailureType = "upstream_error", "upstream_error"
 	default:
 		result.HealthStatus, result.FailureType = "http_error", "http"
 	}
 	return result
+}
+
+func probeOpenCodeExitIP(ctx context.Context, client *http.Client) (string, error) {
+	endpoints := []struct {
+		url  string
+		json bool
+	}{
+		{url: "https://api64.ipify.org?format=json", json: true},
+		{url: "https://api.ip.sb/ip", json: false},
+	}
+	var failures []string
+	for _, endpoint := range endpoints {
+		req, _ := http.NewRequestWithContext(ctx, http.MethodGet, endpoint.url, nil)
+		resp, err := client.Do(req)
+		if err != nil {
+			failures = append(failures, classifyProbeError(err))
+			continue
+		}
+		body, readErr := io.ReadAll(io.LimitReader(resp.Body, 4096))
+		_ = resp.Body.Close()
+		if readErr != nil || resp.StatusCode != http.StatusOK {
+			failures = append(failures, fmt.Sprintf("HTTP %d", resp.StatusCode))
+			continue
+		}
+		value := strings.TrimSpace(string(body))
+		if endpoint.json {
+			var payload struct {
+				IP string `json:"ip"`
+			}
+			if json.Unmarshal(body, &payload) != nil {
+				failures = append(failures, "invalid JSON")
+				continue
+			}
+			value = strings.TrimSpace(payload.IP)
+		}
+		addr, parseErr := netip.ParseAddr(value)
+		if parseErr == nil {
+			return addr.Unmap().String(), nil
+		}
+		failures = append(failures, "invalid IP")
+	}
+	return "", fmt.Errorf("exit probe services failed: %s", strings.Join(failures, ", "))
+}
+
+func openCodeRetryAt(resp *http.Response, now time.Time) *time.Time {
+	if resp == nil || resp.StatusCode != http.StatusTooManyRequests {
+		return nil
+	}
+	if seconds, err := strconv.Atoi(strings.TrimSpace(resp.Header.Get("Retry-After"))); err == nil && seconds > 0 {
+		value := now.Add(time.Duration(seconds) * time.Second)
+		return &value
+	}
+	if raw := strings.TrimSpace(resp.Header.Get("Retry-After")); raw != "" {
+		if value, err := http.ParseTime(raw); err == nil && value.After(now) {
+			return &value
+		}
+	}
+	for _, name := range []string{"x-ratelimit-reset", "x-ratelimit-reset-requests"} {
+		raw := strings.TrimSpace(resp.Header.Get(name))
+		if raw == "" {
+			continue
+		}
+		if epoch, err := strconv.ParseInt(raw, 10, 64); err == nil {
+			value := time.Unix(epoch, 0)
+			if value.After(now) {
+				return &value
+			}
+		}
+	}
+	return nil
 }
 
 func populateOpenCodeGeo(ctx context.Context, client *http.Client, result *OpenCodeNodeProbeResult) {

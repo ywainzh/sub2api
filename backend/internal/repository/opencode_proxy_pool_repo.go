@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"strconv"
 	"strings"
 	"time"
 	"unicode/utf8"
@@ -24,16 +25,17 @@ func NewOpenCodeProxyPoolRepository(db *sql.DB) service.OpenCodeProxyPoolReposit
 }
 
 const proxySubscriptionColumns = `
-	id, name, url_ciphertext, enabled, sync_interval_minutes,
+	id, name, COALESCE(url_ciphertext, ''), enabled, sync_interval_minutes,
 	last_fetched_at, last_success_at, COALESCE(last_error, ''), node_count,
-	COALESCE(last_format, ''), COALESCE(last_user_agent, ''), created_at, updated_at`
+	COALESCE(last_format, ''), COALESCE(last_user_agent, ''), created_at, updated_at,
+	COALESCE(source_type, 'url')`
 
 func scanProxySubscription(scanner interface{ Scan(...any) error }) (*service.ProxySubscription, error) {
 	var item service.ProxySubscription
 	if err := scanner.Scan(
 		&item.ID, &item.Name, &item.URLCiphertext, &item.Enabled, &item.SyncIntervalMinutes,
 		&item.LastFetchedAt, &item.LastSuccessAt, &item.LastError, &item.NodeCount,
-		&item.LastFormat, &item.LastUserAgent, &item.CreatedAt, &item.UpdatedAt,
+		&item.LastFormat, &item.LastUserAgent, &item.CreatedAt, &item.UpdatedAt, &item.SourceType,
 	); err != nil {
 		return nil, err
 	}
@@ -69,9 +71,9 @@ func (r *openCodeProxyPoolRepository) GetSubscription(ctx context.Context, id in
 
 func (r *openCodeProxyPoolRepository) CreateSubscription(ctx context.Context, input service.ProxySubscription) (*service.ProxySubscription, error) {
 	return scanProxySubscription(r.db.QueryRowContext(ctx, `
-		INSERT INTO proxy_subscriptions (name, url_ciphertext, enabled, sync_interval_minutes)
-		VALUES ($1,$2,$3,$4) RETURNING `+proxySubscriptionColumns,
-		input.Name, input.URLCiphertext, input.Enabled, input.SyncIntervalMinutes,
+		INSERT INTO proxy_subscriptions (name, url_ciphertext, enabled, sync_interval_minutes, source_type)
+		VALUES ($1,NULLIF($2,''),$3,$4,COALESCE(NULLIF($5,''),'url')) RETURNING `+proxySubscriptionColumns,
+		input.Name, input.URLCiphertext, input.Enabled, input.SyncIntervalMinutes, input.SourceType,
 	))
 }
 
@@ -90,7 +92,7 @@ func (r *openCodeProxyPoolRepository) UpdateSubscription(ctx context.Context, in
 		}
 	}
 	item, err := scanProxySubscription(r.db.QueryRowContext(ctx, `
-		UPDATE proxy_subscriptions SET name=$2, url_ciphertext=$3, enabled=$4,
+		UPDATE proxy_subscriptions SET name=$2, url_ciphertext=NULLIF($3,''), enabled=$4,
 			sync_interval_minutes=$5, updated_at=NOW()
 		WHERE id=$1 AND deleted_at IS NULL RETURNING `+proxySubscriptionColumns,
 		input.ID, input.Name, input.URLCiphertext, input.Enabled, input.SyncIntervalMinutes,
@@ -138,20 +140,24 @@ func (r *openCodeProxyPoolRepository) DeleteSubscription(ctx context.Context, id
 
 const managedNodeColumns = `
 	n.id, n.subscription_id, n.proxy_id, n.node_key, n.display_name, n.mihomo_name,
-	n.protocol, n.config_ciphertext, n.listener_port, n.sync_status, n.health_status,
+	n.protocol, n.config_ciphertext, COALESCE(n.listener_port, 0), COALESCE(n.transport_mode, 'mihomo_listener'), n.sync_status, n.health_status,
 	n.last_seen_at, COALESCE(n.exit_ip, ''), COALESCE(n.country, ''), COALESCE(n.region, ''),
 	n.latency_ms, n.opencode_http_status,
 	COALESCE(n.failure_type, ''), COALESCE(n.failure_message, ''), n.last_probe_at,
-	n.duplicate_of_node_id, COALESCE(p.username, ''), COALESCE(p.password, '')`
+	n.duplicate_of_node_id, n.unavailable_since, n.last_successful_probe_at,
+	COALESCE(n.consecutive_failures, 0), n.retry_at, COALESCE(n.retry_count, 0),
+	COALESCE(p.username, ''), COALESCE(p.password, ''), COALESCE(p.protocol, ''),
+	COALESCE(p.host, ''), COALESCE(p.port, 0)`
 
 func scanManagedNode(scanner interface{ Scan(...any) error }) (*service.ManagedProxyNode, error) {
 	var item service.ManagedProxyNode
 	err := scanner.Scan(
 		&item.ID, &item.SubscriptionID, &item.ProxyID, &item.NodeKey, &item.DisplayName, &item.MihomoName,
-		&item.Protocol, &item.ConfigCiphertext, &item.ListenerPort, &item.SyncStatus, &item.HealthStatus,
+		&item.Protocol, &item.ConfigCiphertext, &item.ListenerPort, &item.TransportMode, &item.SyncStatus, &item.HealthStatus,
 		&item.LastSeenAt, &item.ExitIP, &item.Country, &item.Region, &item.LatencyMs, &item.OpenCodeHTTPStatus,
 		&item.FailureType, &item.FailureMessage, &item.LastProbeAt, &item.DuplicateOfNodeID,
-		&item.ListenerUsername, &item.ListenerPassword,
+		&item.UnavailableSince, &item.LastSuccessfulProbeAt, &item.ConsecutiveFailures, &item.RetryAt, &item.RetryCount,
+		&item.ListenerUsername, &item.ListenerPassword, &item.ProxyProtocol, &item.ProxyHost, &item.ProxyPort,
 	)
 	return &item, err
 }
@@ -184,7 +190,7 @@ func (r *openCodeProxyPoolRepository) UsedListenerPorts(ctx context.Context) (ma
 	// Listener ports are globally unique, including for soft-deleted nodes. Keep
 	// historical reservations out of circulation so a later subscription sync
 	// cannot collide with the database's non-partial unique constraint.
-	rows, err := r.db.QueryContext(ctx, `SELECT listener_port FROM managed_proxy_nodes`)
+	rows, err := r.db.QueryContext(ctx, `SELECT listener_port FROM managed_proxy_nodes WHERE listener_port IS NOT NULL`)
 	if err != nil {
 		return nil, err
 	}
@@ -208,6 +214,18 @@ func truncateRunes(value string, max int) string {
 	return string(runes[:max])
 }
 
+func proxyConfigString(config map[string]any, key string) string {
+	return strings.TrimSpace(fmt.Sprint(config[key]))
+}
+
+func proxyConfigPort(config map[string]any) (int, error) {
+	port, err := strconv.Atoi(proxyConfigString(config, "port"))
+	if err != nil || port <= 0 || port > 65535 {
+		return 0, fmt.Errorf("invalid proxy port")
+	}
+	return port, nil
+}
+
 func (r *openCodeProxyPoolRepository) CommitSubscriptionSync(ctx context.Context, subscriptionID int64, drafts []service.ManagedProxyNodeDraft, format, userAgent string) error {
 	tx, err := r.db.BeginTx(ctx, nil)
 	if err != nil {
@@ -229,29 +247,46 @@ func (r *openCodeProxyPoolRepository) CommitSubscriptionSync(ctx context.Context
 	for _, draft := range drafts {
 		var nodeID int64
 		var proxyID sql.NullInt64
+		var listenerPort any
+		if draft.TransportMode == "mihomo_listener" {
+			listenerPort = draft.ListenerPort
+		}
 		err := tx.QueryRowContext(ctx, `
 			INSERT INTO managed_proxy_nodes (
 				subscription_id, proxy_id, node_key, display_name, mihomo_name, protocol,
-				config_ciphertext, listener_port, sync_status, health_status, last_seen_at
-			) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,'active','unprobed',NOW())
+				config_ciphertext, listener_port, transport_mode, sync_status, health_status, last_seen_at
+			) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,'active','unprobed',NOW())
 			ON CONFLICT (subscription_id, node_key) DO UPDATE SET
 				display_name=EXCLUDED.display_name, mihomo_name=EXCLUDED.mihomo_name,
 				protocol=EXCLUDED.protocol, config_ciphertext=EXCLUDED.config_ciphertext,
-				listener_port=EXCLUDED.listener_port, sync_status='active', last_seen_at=NOW(),
+				listener_port=EXCLUDED.listener_port, transport_mode=EXCLUDED.transport_mode,
+				sync_status='active', last_seen_at=NOW(),
 				deleted_at=NULL, updated_at=NOW()
 			RETURNING id, proxy_id`,
 			subscriptionID, draft.ProxyID, draft.NodeKey, draft.DisplayName, draft.MihomoName,
-			draft.Protocol, draft.ConfigCiphertext, draft.ListenerPort,
+			draft.Protocol, draft.ConfigCiphertext, listenerPort, draft.TransportMode,
 		).Scan(&nodeID, &proxyID)
 		if err != nil {
 			return err
 		}
 		proxyName := truncateRunes("OpenCode / "+draft.DisplayName, 100)
+		proxyProtocol, proxyHost, proxyPort := "http", "opencode-mihomo", draft.ListenerPort
+		proxyUsername, proxyPassword := draft.ListenerUsername, draft.ListenerPassword
+		if draft.TransportMode == "direct_http" {
+			proxyProtocol = strings.ToLower(proxyConfigString(draft.ProxyConfig, "type"))
+			proxyHost = proxyConfigString(draft.ProxyConfig, "server")
+			proxyPort, err = proxyConfigPort(draft.ProxyConfig)
+			if err != nil || proxyHost == "" || (proxyProtocol != "http" && proxyProtocol != "https") {
+				return fmt.Errorf("invalid direct HTTP proxy %q", draft.DisplayName)
+			}
+			proxyUsername = proxyConfigString(draft.ProxyConfig, "username")
+			proxyPassword = proxyConfigString(draft.ProxyConfig, "password")
+		}
 		if !proxyID.Valid {
 			err = tx.QueryRowContext(ctx, `
 				INSERT INTO proxies (name, protocol, host, port, username, password, status, fallback_mode, expiry_warn_days)
-				VALUES ($1,'http','opencode-mihomo',$2,$3,$4,'active','none',7) RETURNING id`,
-				proxyName, draft.ListenerPort, draft.ListenerUsername, draft.ListenerPassword,
+				VALUES ($1,$2,$3,$4,NULLIF($5,''),NULLIF($6,''),'active','none',7) RETURNING id`,
+				proxyName, proxyProtocol, proxyHost, proxyPort, proxyUsername, proxyPassword,
 			).Scan(&proxyID.Int64)
 			if err != nil {
 				return err
@@ -261,10 +296,10 @@ func (r *openCodeProxyPoolRepository) CommitSubscriptionSync(ctx context.Context
 			}
 		} else {
 			_, err = tx.ExecContext(ctx, `
-				UPDATE proxies SET name=$2, protocol='http', host='opencode-mihomo', port=$3,
-					username=$4, password=$5, status='active', fallback_mode='none', backup_proxy_id=NULL,
+				UPDATE proxies SET name=$2, protocol=$3, host=$4, port=$5,
+					username=NULLIF($6,''), password=NULLIF($7,''), status='active', fallback_mode='none', backup_proxy_id=NULL,
 					updated_at=NOW(), deleted_at=NULL WHERE id=$1`,
-				proxyID.Int64, proxyName, draft.ListenerPort, draft.ListenerUsername, draft.ListenerPassword,
+				proxyID.Int64, proxyName, proxyProtocol, proxyHost, proxyPort, proxyUsername, proxyPassword,
 			)
 			if err != nil {
 				return err
@@ -304,20 +339,58 @@ func (r *openCodeProxyPoolRepository) UpdateNodeProbeResults(ctx context.Context
 		if result.OpenCodeHTTPStatus > 0 {
 			status = result.OpenCodeHTTPStatus
 		}
+		isHardFailure := isOpenCodeHardProbeFailure(result.FailureType)
+		var retryAt any
+		if result.RetryAt != nil {
+			retryAt = *result.RetryAt
+		}
 		_, err := tx.ExecContext(ctx, `
-			UPDATE managed_proxy_nodes SET health_status=$2, exit_ip=NULLIF($3,''),
-				country=NULLIF($4,''), region=NULLIF($5,''), latency_ms=$6,
+			UPDATE managed_proxy_nodes SET
+				health_status=CASE
+					WHEN $11 THEN 'healthy'
+					WHEN $12 AND COALESCE(unavailable_since, NOW()) <= NOW() - INTERVAL '7 days' THEN 'quarantined'
+					ELSE $2 END,
+				exit_ip=NULLIF($3,''), country=NULLIF($4,''), region=NULLIF($5,''), latency_ms=$6,
 				opencode_http_status=$7, failure_type=NULLIF($8,''), failure_message=NULLIF($9,''),
-				last_probe_at=NOW(), duplicate_of_node_id=$10, updated_at=NOW()
+				last_probe_at=NOW(), duplicate_of_node_id=$10,
+				last_successful_probe_at=CASE WHEN $11 THEN NOW() ELSE last_successful_probe_at END,
+				unavailable_since=CASE WHEN $11 THEN NULL WHEN $12 THEN COALESCE(unavailable_since, NOW()) ELSE unavailable_since END,
+				consecutive_failures=CASE WHEN $11 THEN 0 WHEN $12 THEN consecutive_failures + 1 ELSE consecutive_failures END,
+				retry_count=CASE WHEN $11 THEN 0 ELSE retry_count + 1 END,
+				retry_at=CASE WHEN $11 THEN NULL ELSE COALESCE($13, NOW() + CASE
+					WHEN retry_count <= 0 THEN INTERVAL '5 minutes'
+					WHEN retry_count = 1 THEN INTERVAL '15 minutes'
+					WHEN retry_count = 2 THEN INTERVAL '1 hour'
+					ELSE INTERVAL '6 hours' END) END,
+				updated_at=NOW()
 			WHERE id=$1 AND deleted_at IS NULL`,
 			result.NodeID, result.HealthStatus, result.ExitIP, result.Country, result.Region, latency, status,
 			result.FailureType, truncateRunes(result.FailureMessage, 2000), result.DuplicateOfNodeID,
+			result.Success, isHardFailure, retryAt,
 		)
 		if err != nil {
 			return err
 		}
+		proxyStatus := "disabled"
+		if result.Success {
+			proxyStatus = "active"
+		}
+		if _, err := tx.ExecContext(ctx, `
+			UPDATE proxies SET status=$2, updated_at=NOW()
+			WHERE id=(SELECT proxy_id FROM managed_proxy_nodes WHERE id=$1)`, result.NodeID, proxyStatus); err != nil {
+			return err
+		}
 	}
 	return tx.Commit()
+}
+
+func isOpenCodeHardProbeFailure(failureType string) bool {
+	switch failureType {
+	case "tls", "dns", "timeout", "transport", "exit_probe", "auth":
+		return true
+	default:
+		return false
+	}
 }
 
 func (r *openCodeProxyPoolRepository) IsManagedProxy(ctx context.Context, proxyID int64) (bool, error) {
@@ -866,7 +939,7 @@ func (r *openCodeProxyPoolRepository) ReconcileOpenCodePoolWorkers(
 			JOIN proxy_subscriptions s ON s.id=n.subscription_id AND s.deleted_at IS NULL AND s.enabled=TRUE
 			WHERE n.deleted_at IS NULL AND n.sync_status='active' AND n.health_status='healthy'
 				AND n.duplicate_of_node_id IS NULL AND NULLIF(BTRIM(n.exit_ip),'') IS NOT NULL
-				AND n.proxy_id IS NOT NULL AND n.last_probe_at >= NOW() - INTERVAL '15 minutes'
+				AND n.proxy_id IS NOT NULL AND n.last_probe_at >= NOW() - INTERVAL '26 hours'
 			ORDER BY n.id`)
 		if err != nil {
 			return nil, err
@@ -966,7 +1039,7 @@ func (r *openCodeProxyPoolRepository) ReconcileOpenCodePoolWorkers(
 						WHEN deleted_at IS NOT NULL OR sync_status<>'active' THEN 'node_missing'
 						WHEN health_status='rate_limited' THEN 'rate_limited'
 						WHEN health_status='duplicate_exit' OR duplicate_of_node_id IS NOT NULL THEN 'duplicate_exit_ip'
-						WHEN last_probe_at IS NULL OR last_probe_at < NOW() - INTERVAL '15 minutes' THEN 'probe_stale'
+						WHEN last_probe_at IS NULL OR last_probe_at < NOW() - INTERVAL '26 hours' THEN 'probe_stale'
 						ELSE COALESCE(NULLIF(failure_type,''), 'transport_error') END
 					FROM managed_proxy_nodes WHERE id=$1`, worker.nodeID.Int64).Scan(&reason)
 			}

@@ -35,6 +35,7 @@ export interface ProxySubscription {
   url_masked: string
   created_at: string
   updated_at: string
+	 source_type: 'url' | 'upload'
 }
 
 export interface ManagedProxyNode {
@@ -46,6 +47,7 @@ export interface ManagedProxyNode {
   mihomo_name: string
   protocol: string
   listener_port: number
+	 transport_mode: 'mihomo_listener' | 'direct_http'
   sync_status: string
   health_status: string
   last_seen_at?: string | null
@@ -58,6 +60,11 @@ export interface ManagedProxyNode {
   failure_message?: string
   last_probe_at?: string | null
   duplicate_of_node_id?: number | null
+	 unavailable_since?: string | null
+	 last_successful_probe_at?: string | null
+	 consecutive_failures: number
+	 retry_at?: string | null
+	 retry_count: number
 }
 
 export interface OpenCodeNodeProbeResult {
@@ -72,6 +79,32 @@ export interface OpenCodeNodeProbeResult {
   failure_type?: string
   failure_message?: string
   duplicate_of_node_id?: number | null
+}
+
+export interface OpenCodeMaintenanceJob {
+  id: number
+  job_type: 'import' | 'probe'
+  trigger_type: string
+  status: 'pending' | 'running' | 'completed' | 'failed'
+  source_name?: string
+  subscription_id?: number | null
+  total_nodes: number
+  processed_nodes: number
+  healthy_nodes: number
+  failed_nodes: number
+  rate_limited_nodes: number
+  duplicate_nodes: number
+  deleted_nodes: number
+  error_message?: string
+  started_at?: string | null
+  finished_at?: string | null
+  created_at: string
+  updated_at: string
+}
+
+export interface OpenCodeMaintenanceStatus {
+  next_run_at?: string | null
+  latest_job?: OpenCodeMaintenanceJob | null
 }
 
 export interface OpenCodeModelRegistryStatus {
@@ -416,6 +449,36 @@ export async function probeOpenCodeNodes(nodeIds: number[] = []): Promise<OpenCo
   return data
 }
 
+export async function createOpenCodeProbeJob(nodeIds: number[] = []): Promise<OpenCodeMaintenanceJob> {
+  const { data } = await apiClient.post<OpenCodeMaintenanceJob>('/admin/opencode/proxies/probe-jobs', {
+    node_ids: nodeIds
+  })
+  return data
+}
+
+export async function importOpenCodeProxies(file: File, name?: string): Promise<OpenCodeMaintenanceJob> {
+  const form = new FormData()
+  form.append('file', file)
+  if (name) form.append('name', name)
+  const { data } = await apiClient.post<OpenCodeMaintenanceJob>('/admin/opencode/proxies/import', form)
+  return data
+}
+
+export async function getOpenCodeMaintenanceJob(id: number): Promise<OpenCodeMaintenanceJob> {
+  const { data } = await apiClient.get<OpenCodeMaintenanceJob>(`/admin/opencode/jobs/${id}`)
+  return data
+}
+
+export async function getOpenCodeMaintenance(): Promise<OpenCodeMaintenanceStatus> {
+  const { data } = await apiClient.get<OpenCodeMaintenanceStatus>('/admin/opencode/maintenance')
+  return data
+}
+
+export async function deleteOpenCodeManagedNode(id: number): Promise<{ message: string }> {
+  const { data } = await apiClient.delete<{ message: string }>(`/admin/opencode/proxies/${id}`)
+  return data
+}
+
 export async function getOpenCodeModels(): Promise<OpenCodeModelRegistryStatus> {
   const { data } = await apiClient.get<OpenCodeModelRegistryStatus>('/admin/opencode/models')
   return data
@@ -476,6 +539,11 @@ export const proxiesAPI = {
   syncSubscription,
   listSubscriptionNodes,
   probeOpenCodeNodes,
+	createOpenCodeProbeJob,
+	importOpenCodeProxies,
+	getOpenCodeMaintenanceJob,
+	getOpenCodeMaintenance,
+	deleteOpenCodeManagedNode,
   getOpenCodeModels,
   refreshOpenCodeModels,
   getOpenCodePool,

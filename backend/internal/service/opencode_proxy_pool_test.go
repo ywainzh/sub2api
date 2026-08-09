@@ -10,6 +10,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/require"
 )
@@ -63,6 +64,7 @@ func TestOpenCodeShareLinkProtocols(t *testing.T) {
 		{"ss://" + ssCredentials + "@ss.example.com:8388#ss-node", "ss", "cipher", "aes-128-gcm"},
 		{"vless://11111111-1111-1111-1111-111111111111@vless.example.com:443#vless-node", "vless", "uuid", "11111111-1111-1111-1111-111111111111"},
 		{"trojan://trojan-password@trojan.example.com:443#trojan-node", "trojan", "password", "trojan-password"},
+		{"http://proxy-user:proxy-password@192.0.2.10:8080", "http", "username", "proxy-user"},
 	}
 	for _, test := range tests {
 		t.Run(test.protocol, func(t *testing.T) {
@@ -72,6 +74,39 @@ func TestOpenCodeShareLinkProtocols(t *testing.T) {
 			require.Equal(t, test.value, proxy[test.field])
 		})
 	}
+}
+
+func TestOpenCodeHTTPProxyCredentialsRemainPartOfFingerprint(t *testing.T) {
+	first, err := openCodeShareLinkToMihomo("http://user-a:secret@192.0.2.10:8080")
+	require.NoError(t, err)
+	second, err := openCodeShareLinkToMihomo("http://user-b:secret@192.0.2.10:8080")
+	require.NoError(t, err)
+	firstKey, _, err := nodeFingerprint(first)
+	require.NoError(t, err)
+	secondKey, _, err := nodeFingerprint(second)
+	require.NoError(t, err)
+	require.NotEqual(t, firstKey, secondKey)
+}
+
+func TestOpenCodeRetryAtParsesRetryAfter(t *testing.T) {
+	now := time.Date(2026, time.August, 9, 12, 0, 0, 0, time.UTC)
+	response := &http.Response{StatusCode: http.StatusTooManyRequests, Header: make(http.Header)}
+	response.Header.Set("Retry-After", "300")
+	retryAt := openCodeRetryAt(response, now)
+	require.NotNil(t, retryAt)
+	require.Equal(t, now.Add(5*time.Minute), *retryAt)
+
+	response.StatusCode = http.StatusServiceUnavailable
+	require.Nil(t, openCodeRetryAt(response, now))
+}
+
+func TestNextOpenCodeMaintenanceRunUsesShanghaiMidnight(t *testing.T) {
+	service := &OpenCodeProxyPoolService{}
+	now := time.Date(2026, time.August, 9, 16, 30, 0, 0, time.UTC) // 2026-08-10 00:30 Asia/Shanghai
+	next := service.setNextMaintenanceRun(now)
+	location, err := time.LoadLocation("Asia/Shanghai")
+	require.NoError(t, err)
+	require.Equal(t, time.Date(2026, time.August, 11, 0, 0, 0, 0, location), next)
 }
 
 func TestOpenCodeNodeFingerprintIgnoresDisplayName(t *testing.T) {
@@ -133,6 +168,25 @@ func TestReloadMihomoCandidateFailureRestoresLastKnownGood(t *testing.T) {
 	restored, readErr := os.ReadFile(filepath.Join(configDir, "config.yaml"))
 	require.NoError(t, readErr)
 	require.Equal(t, previous, restored)
+}
+
+func TestReloadMihomoSkipsDirectHTTPNodes(t *testing.T) {
+	requests := 0
+	controller := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		requests++
+		w.WriteHeader(http.StatusNoContent)
+	}))
+	t.Cleanup(controller.Close)
+	service := &OpenCodeProxyPoolService{controller: controller.URL, configDir: t.TempDir(), httpClient: controller.Client()}
+	draft := ManagedProxyNodeDraft{
+		ManagedProxyNode: ManagedProxyNode{NodeKey: strings.Repeat("b", 64), TransportMode: "direct_http"},
+		ProxyConfig:      map[string]any{"name": "direct", "type": "http", "server": "192.0.2.10", "port": 8080},
+	}
+	require.NoError(t, service.reloadMihomo(context.Background(), []ManagedProxyNodeDraft{draft}))
+	require.Equal(t, 1, requests)
+	config, err := os.ReadFile(filepath.Join(service.configDir, "config.yaml"))
+	require.NoError(t, err)
+	require.NotContains(t, string(config), "192.0.2.10")
 }
 
 func TestPopulateOpenCodeGeo(t *testing.T) {

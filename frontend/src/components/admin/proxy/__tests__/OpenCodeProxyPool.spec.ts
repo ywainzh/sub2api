@@ -11,6 +11,11 @@ const api = vi.hoisted(() => ({
   deleteSubscription: vi.fn(),
   syncSubscription: vi.fn(),
   probeOpenCodeNodes: vi.fn(),
+	createOpenCodeProbeJob: vi.fn(),
+	getOpenCodeMaintenanceJob: vi.fn(),
+	getOpenCodeMaintenance: vi.fn(),
+	importOpenCodeProxies: vi.fn(),
+	deleteOpenCodeManagedNode: vi.fn(),
   getOpenCodeModels: vi.fn(),
   refreshOpenCodeModels: vi.fn(),
   getOpenCodePool: vi.fn(),
@@ -39,6 +44,8 @@ vi.mock('vue-i18n', async () => {
         if (key === 'admin.proxies.openCode.probeCompleted') {
           return `complete: ${params?.healthy}/${params?.rateLimited}/${params?.duplicate}/${params?.failed}`
         }
+		if (key === 'admin.proxies.openCode.jobProgress') return `${params?.processed}/${params?.total}`
+		if (key === 'admin.proxies.openCode.jobCompleted') return `job: ${params?.healthy}/${params?.failed}`
         return key
       }
     })
@@ -54,7 +61,8 @@ const createdSubscription = {
   has_url: true,
   url_masked: 'https://example.com/***',
   created_at: '2026-08-07T00:00:00Z',
-  updated_at: '2026-08-07T00:00:00Z'
+	updated_at: '2026-08-07T00:00:00Z',
+	source_type: 'url'
 }
 
 const poolStatus = {
@@ -86,12 +94,15 @@ const managedNode = {
   mihomo_name: 'managed-28',
   protocol: 'vmess',
   listener_port: 22021,
+	transport_mode: 'mihomo_listener',
   sync_status: 'active',
   health_status: 'healthy',
   exit_ip: '203.0.113.28',
   latency_ms: 250,
   opencode_http_status: 200,
-  last_probe_at: '2026-08-07T00:00:00Z'
+	last_probe_at: '2026-08-07T00:00:00Z',
+	consecutive_failures: 0,
+	retry_count: 0
 }
 
 const rateLimitedNode = {
@@ -130,6 +141,7 @@ describe('OpenCodeProxyPool subscription save flow', () => {
     api.getOpenCodeModels.mockResolvedValue({ ids: [], count: 0, using_baseline: true })
     api.getOpenCodePool.mockResolvedValue(poolStatus)
     api.listOpenCodePoolWorkers.mockResolvedValue([])
+	api.getOpenCodeMaintenance.mockResolvedValue({ next_run_at: '2026-08-08T16:00:00Z' })
   })
 
   it('closes and confirms persistence before the initial sync finishes', async () => {
@@ -220,13 +232,16 @@ describe('OpenCodeProxyPool subscription save flow', () => {
   })
 
   it('shows honest progress immediately and summarizes the completed batch', async () => {
-    let resolveProbe!: (results: Array<Record<string, unknown>>) => void
-    const pendingProbe = new Promise<Array<Record<string, unknown>>>((resolve) => {
-      resolveProbe = resolve
-    })
+	vi.useFakeTimers()
     api.listSubscriptions.mockResolvedValue([createdSubscription])
     api.listSubscriptionNodes.mockResolvedValue([managedNode])
-    api.probeOpenCodeNodes.mockReturnValue(pendingProbe)
+	api.createOpenCodeProbeJob.mockResolvedValue({ id: 7, status: 'pending', processed_nodes: 0, total_nodes: 1 })
+	api.getOpenCodeMaintenanceJob
+	  .mockResolvedValueOnce({ id: 7, status: 'running', processed_nodes: 0, total_nodes: 1 })
+	  .mockResolvedValueOnce({
+		id: 7, status: 'completed', processed_nodes: 1, total_nodes: 1,
+		healthy_nodes: 1, failed_nodes: 0, rate_limited_nodes: 0, duplicate_nodes: 0
+	  })
 
     const wrapper = mount(OpenCodeProxyPool, {
       props: { view: 'nodes' },
@@ -242,32 +257,22 @@ describe('OpenCodeProxyPool subscription save flow', () => {
     const probeButton = wrapper.get('[data-testid="opencode-probe-all"]')
     await probeButton.trigger('click')
 
-    expect(api.probeOpenCodeNodes).toHaveBeenCalledOnce()
-    expect(api.probeOpenCodeNodes).toHaveBeenCalledWith([28])
+	expect(api.createOpenCodeProbeJob).toHaveBeenCalledOnce()
+	expect(api.createOpenCodeProbeJob).toHaveBeenCalledWith([28])
     expect(probeButton.attributes('disabled')).toBeDefined()
     expect(probeButton.attributes('aria-busy')).toBe('true')
     expect(probeButton.text()).toContain('admin.proxies.openCode.probing')
-    expect(wrapper.get('[data-testid="opencode-probe-progress"]').text()).toContain('probing 1 nodes')
+	expect(wrapper.get('[data-testid="opencode-probe-progress"]').text()).toContain('0/1')
     expect(wrapper.get('[data-testid="opencode-node-probing"]').exists()).toBe(true)
 
-    resolveProbe([
-      {
-        node_id: 28,
-        success: true,
-        health_status: 'healthy',
-        exit_ip: '203.0.113.28',
-        opencode_http_status: 200
-      },
-      { node_id: 29, success: false, health_status: 'rate_limited', opencode_http_status: 429 },
-      { node_id: 30, success: false, health_status: 'duplicate_exit' },
-      { node_id: 31, success: false, health_status: 'transport_error' }
-    ])
+	await vi.advanceTimersByTimeAsync(2000)
     await flushPromises()
 
     expect(wrapper.find('[data-testid="opencode-probe-progress"]').exists()).toBe(false)
     expect(wrapper.find('[data-testid="opencode-node-probing"]').exists()).toBe(false)
-    expect(notifications.showSuccess).toHaveBeenCalledWith('complete: 1/1/1/1', 6000)
-    wrapper.unmount()
+	expect(notifications.showSuccess).toHaveBeenCalledWith('job: 1/0', 6000)
+	wrapper.unmount()
+	vi.useRealTimers()
   })
 
   it('probes only the selected node from its row action', async () => {
@@ -313,6 +318,25 @@ describe('OpenCodeProxyPool subscription save flow', () => {
     expect(wrapper.find('[data-testid="opencode-probe-progress"]').exists()).toBe(false)
     expect(notifications.showSuccess).toHaveBeenCalledWith('complete: 1/0/0/0', 6000)
     wrapper.unmount()
+  })
+
+  it('deletes a managed node only after confirmation', async () => {
+    api.listSubscriptions.mockResolvedValue([createdSubscription])
+    api.listSubscriptionNodes.mockResolvedValue([managedNode])
+    api.deleteOpenCodeManagedNode.mockResolvedValue({ message: 'deleted' })
+    vi.spyOn(window, 'confirm').mockReturnValue(true)
+    const wrapper = mount(OpenCodeProxyPool, {
+      props: { view: 'nodes' },
+      global: { stubs: { Icon: true, BaseDialog: true } }
+    })
+    await flushPromises()
+
+    await wrapper.get('[data-testid="opencode-delete-node-28"]').trigger('click')
+    await flushPromises()
+
+    expect(window.confirm).toHaveBeenCalledOnce()
+    expect(api.deleteOpenCodeManagedNode).toHaveBeenCalledWith(28)
+    expect(notifications.showSuccess).toHaveBeenCalled()
   })
 
   it('switches from subscriptions to the matching problem nodes when a metric is clicked', async () => {

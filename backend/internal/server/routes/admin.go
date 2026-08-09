@@ -501,6 +501,11 @@ func registerOpenCodeProxyRoutes(admin *gin.RouterGroup, h *handler.Handlers) {
 		subscriptions.GET("/:id/nodes", h.Admin.Proxy.ListProxySubscriptionNodes)
 	}
 	admin.POST("/opencode/proxies/probe", h.Admin.Proxy.ProbeOpenCodeProxies)
+	admin.POST("/opencode/proxies/import", h.Admin.Proxy.ImportOpenCodeProxies)
+	admin.POST("/opencode/proxies/probe-jobs", h.Admin.Proxy.CreateOpenCodeProbeJob)
+	admin.DELETE("/opencode/proxies/:id", h.Admin.Proxy.DeleteOpenCodeManagedNode)
+	admin.GET("/opencode/jobs/:id", h.Admin.Proxy.GetOpenCodeMaintenanceJob)
+	admin.GET("/opencode/maintenance", h.Admin.Proxy.GetOpenCodeMaintenance)
 	admin.GET("/opencode/models", h.Admin.Proxy.GetOpenCodeModels)
 	admin.POST("/opencode/models/refresh", h.Admin.Proxy.RefreshOpenCodeModels)
 	admin.GET("/opencode/pool", h.Admin.Proxy.GetOpenCodePool)
