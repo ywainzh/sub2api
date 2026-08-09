@@ -25,6 +25,27 @@ func TestOpenCodeWorkerExtraForcesChatCompletions(t *testing.T) {
 	require.Equal(t, float64(nodeID), extra["managed_node_id"])
 }
 
+func TestOpenCodeWorkerPriorityUsesStableLatencyBuckets(t *testing.T) {
+	tests := []struct {
+		name      string
+		latencyMs int64
+		want      int
+	}{
+		{name: "unknown", latencyMs: 0, want: 50},
+		{name: "negative", latencyMs: -1, want: 50},
+		{name: "first bucket", latencyMs: 1, want: 1},
+		{name: "bucket boundary", latencyMs: 1000, want: 1},
+		{name: "second bucket", latencyMs: 1738, want: 2},
+		{name: "fourth bucket", latencyMs: 3132, want: 4},
+		{name: "default priority cap", latencyMs: 50001, want: 50},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			require.Equal(t, test.want, openCodeWorkerPriority(test.latencyMs))
+		})
+	}
+}
+
 func TestUsedListenerPortsIncludesSoftDeletedReservations(t *testing.T) {
 	db, mock, err := sqlmock.New(sqlmock.QueryMatcherOption(sqlmock.QueryMatcherEqual))
 	require.NoError(t, err)

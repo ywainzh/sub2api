@@ -23,42 +23,11 @@
           <div class="text-xs text-gray-500 dark:text-gray-400">
             429 / {{ t('admin.proxies.openCode.duplicateExit') }} / {{ t('admin.proxies.openCode.otherFailures') }}
           </div>
-          <div class="mt-1 flex items-center text-xl font-semibold text-amber-600">
-            <button
-              type="button"
-              class="inline-flex h-11 min-w-11 items-center justify-center rounded-lg px-2 transition-colors duration-200 hover:bg-amber-100 focus:outline-none focus:ring-2 focus:ring-amber-500 focus:ring-offset-1 disabled:cursor-default disabled:opacity-50 dark:hover:bg-amber-900/30 dark:focus:ring-offset-dark-900"
-              :class="healthFilter === 'rate_limited' ? 'bg-amber-100 ring-1 ring-amber-300 dark:bg-amber-900/30 dark:ring-amber-700' : ''"
-              :disabled="pool.rate_limited_nodes === 0"
-              :title="t('admin.proxies.openCode.viewNodesByStatus', { status: '429', count: pool.rate_limited_nodes })"
-              data-testid="opencode-filter-rate-limited"
-              @click="showNodeFilter('rate_limited')"
-            >
-              {{ pool.rate_limited_nodes }}
-            </button>
-            <span aria-hidden="true">/</span>
-            <button
-              type="button"
-              class="inline-flex h-11 min-w-11 items-center justify-center rounded-lg px-2 transition-colors duration-200 hover:bg-amber-100 focus:outline-none focus:ring-2 focus:ring-amber-500 focus:ring-offset-1 disabled:cursor-default disabled:opacity-50 dark:hover:bg-amber-900/30 dark:focus:ring-offset-dark-900"
-              :class="healthFilter === 'duplicate_exit' ? 'bg-amber-100 ring-1 ring-amber-300 dark:bg-amber-900/30 dark:ring-amber-700' : ''"
-              :disabled="pool.duplicate_nodes === 0"
-              :title="t('admin.proxies.openCode.viewNodesByStatus', { status: t('admin.proxies.openCode.duplicateExit'), count: pool.duplicate_nodes })"
-              data-testid="opencode-filter-duplicate"
-              @click="showNodeFilter('duplicate_exit')"
-            >
-              {{ pool.duplicate_nodes }}
-            </button>
-            <span aria-hidden="true">/</span>
-            <button
-              type="button"
-              class="inline-flex h-11 min-w-11 items-center justify-center rounded-lg px-2 transition-colors duration-200 hover:bg-amber-100 focus:outline-none focus:ring-2 focus:ring-amber-500 focus:ring-offset-1 disabled:cursor-default disabled:opacity-50 dark:hover:bg-amber-900/30 dark:focus:ring-offset-dark-900"
-              :class="healthFilter === 'failed' ? 'bg-amber-100 ring-1 ring-amber-300 dark:bg-amber-900/30 dark:ring-amber-700' : ''"
-              :disabled="pool.failed_nodes === 0"
-              :title="t('admin.proxies.openCode.viewNodesByStatus', { status: t('admin.proxies.openCode.otherFailures'), count: pool.failed_nodes })"
-              data-testid="opencode-filter-failed"
-              @click="showNodeFilter('failed')"
-            >
-              {{ pool.failed_nodes }}
-            </button>
+          <div
+            class="mt-1 text-xl font-semibold text-amber-600"
+            data-testid="opencode-failure-summary"
+          >
+            {{ pool.rate_limited_nodes }} / {{ pool.duplicate_nodes }} / {{ pool.failed_nodes }}
           </div>
         </div>
         <div class="rounded-xl border border-gray-200 bg-white p-3 dark:border-dark-600 dark:bg-dark-900">
@@ -532,7 +501,6 @@ import Icon from '@/components/icons/Icon.vue'
 import { getPersistedPageSize } from '@/composables/usePersistedPageSize'
 
 const props = defineProps<{ view: 'subscriptions' | 'nodes' }>()
-const emit = defineEmits<{ showNodes: [] }>()
 const { t } = useI18n()
 const appStore = useAppStore()
 const subscriptions = ref<ProxySubscription[]>([])
@@ -632,12 +600,6 @@ const healthLabel = (status: string) =>
     missing: t('admin.proxies.openCode.missing'),
 	quarantined: t('admin.proxies.openCode.quarantined')
   })[status] || status
-
-function showNodeFilter(filter: Exclude<NodeHealthFilter, '' | 'healthy' | 'transport_error' | 'unprobed'>) {
-  healthFilter.value = filter
-  nodePagination.page = 1
-  if (props.view !== 'nodes') emit('showNodes')
-}
 
 function clampPage(total: number, pagination: { page: number; page_size: number }) {
   const lastPage = Math.max(1, Math.ceil(total / pagination.page_size))

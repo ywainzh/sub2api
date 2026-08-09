@@ -403,10 +403,14 @@ describe('OpenCodeProxyPool subscription save flow', () => {
     expect(notifications.showSuccess).toHaveBeenCalled()
   })
 
-  it('switches from subscriptions to the matching problem nodes when a metric is clicked', async () => {
-    api.getOpenCodePool.mockResolvedValue({ ...poolStatus, rate_limited_nodes: 1, healthy_nodes: 1 })
+  it('renders the aggregate failure metric as non-interactive text', async () => {
+    api.getOpenCodePool.mockResolvedValue({
+      ...poolStatus,
+      rate_limited_nodes: 1,
+      duplicate_nodes: 2,
+      failed_nodes: 3
+    })
     api.listSubscriptions.mockResolvedValue([createdSubscription])
-    api.listSubscriptionNodes.mockResolvedValue([managedNode, rateLimitedNode])
 
     const wrapper = mount(OpenCodeProxyPool, {
       props: { view: 'subscriptions' },
@@ -419,18 +423,13 @@ describe('OpenCodeProxyPool subscription save flow', () => {
     })
     await flushPromises()
 
-    await wrapper.get('[data-testid="opencode-filter-rate-limited"]').trigger('click')
-    expect(wrapper.emitted('showNodes')).toEqual([[]])
-
-    await wrapper.setProps({ view: 'nodes' })
-    await flushPromises()
-
-    expect((wrapper.get('select').element as HTMLSelectElement).value).toBe('rate_limited')
-    expect(wrapper.text()).toContain('US rate limited node')
-    expect(wrapper.text()).not.toContain('JP node')
+    const summary = wrapper.get('[data-testid="opencode-failure-summary"]')
+    expect(summary.text()).toBe('1 / 2 / 3')
+    expect(summary.findAll('button')).toHaveLength(0)
+    expect(summary.attributes('title')).toBeUndefined()
   })
 
-  it('drills the aggregate failure metric into every non-429 and non-duplicate failure', async () => {
+  it('filters aggregate failures through the existing health dropdown', async () => {
     api.getOpenCodePool.mockResolvedValue({ ...poolStatus, failed_nodes: 1, healthy_nodes: 1 })
     api.listSubscriptions.mockResolvedValue([createdSubscription])
     api.listSubscriptionNodes.mockResolvedValue([managedNode, rateLimitedNode, authFailedNode])
@@ -446,7 +445,7 @@ describe('OpenCodeProxyPool subscription save flow', () => {
     })
     await flushPromises()
 
-    await wrapper.get('[data-testid="opencode-filter-failed"]').trigger('click')
+    await wrapper.get('select').setValue('failed')
 
     expect((wrapper.get('select').element as HTMLSelectElement).value).toBe('failed')
     expect(wrapper.text()).toContain('US auth failed node')

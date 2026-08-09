@@ -272,7 +272,6 @@ export default {
         httpError: 'HTTP 错误',
         otherFailures: '其他失败',
         duplicateExit: '重复出口',
-        viewNodesByStatus: '查看{status}节点，共 {count} 个',
         autoRecoveryHint: '异常 Worker 自动停用；每 {minutes} 分钟复检，恢复后自动启用',
 		dailyMaintenanceHint: '每日 00:00 全量探测；下次运行：{time}',
 		jobProgress: '任务进行中：已处理 {processed} / {total}',

@@ -137,6 +137,7 @@ func (s *OpenCodeProxyPoolService) runProbeJob(job *OpenCodeMaintenanceJob, ids 
 			job.RateLimitedNodes++
 		case "duplicate_exit":
 			job.DuplicateNodes++
+			job.DeletedNodes++
 		default:
 			job.FailedNodes++
 		}
@@ -281,6 +282,7 @@ func (s *OpenCodeProxyPoolService) runProxyImport(job *OpenCodeMaintenanceJob, d
 			job.RateLimitedNodes++
 		case "duplicate_exit":
 			job.DuplicateNodes++
+			job.DeletedNodes++
 		default:
 			job.FailedNodes++
 		}
@@ -313,6 +315,14 @@ func (s *OpenCodeProxyPoolService) DeleteManagedNode(ctx context.Context, nodeID
 	if err := s.repo.DeleteManagedNode(ctx, nodeID, "manual"); err != nil {
 		return err
 	}
+	if err := s.reloadAfterManagedNodeDeletion(ctx); err != nil {
+		return err
+	}
+	_, err := s.ReconcileWorkers(ctx)
+	return err
+}
+
+func (s *OpenCodeProxyPoolService) reloadAfterManagedNodeDeletion(ctx context.Context) error {
 	drafts, err := s.mergeEnabledSubscriptionDrafts(ctx, 0, nil)
 	if err != nil {
 		return err
@@ -321,6 +331,5 @@ func (s *OpenCodeProxyPoolService) DeleteManagedNode(ctx context.Context, nodeID
 	if err := s.reloadMihomoWithRollback(ctx, drafts, previous); err != nil {
 		return err
 	}
-	_, err = s.ReconcileWorkers(ctx)
-	return err
+	return nil
 }

@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/base64"
 	"encoding/json"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -216,4 +217,96 @@ func TestPopulateOpenCodeGeo(t *testing.T) {
 
 	require.Equal(t, "United States", result.Country)
 	require.Equal(t, "California / Los Angeles", result.Region)
+}
+
+func TestMarkDuplicateOpenCodeExitsKeepsOnlyFastestProbedNode(t *testing.T) {
+	results := []OpenCodeNodeProbeResult{
+		{NodeID: 10, Success: true, HealthStatus: "healthy", ExitIP: "203.0.113.10", LatencyMs: 300},
+		{NodeID: 11, Success: true, HealthStatus: "healthy", ExitIP: "203.0.113.10", LatencyMs: 400},
+		{NodeID: 12, Success: true, HealthStatus: "healthy", ExitIP: "203.0.113.10", LatencyMs: 100},
+	}
+
+	markDuplicateOpenCodeExits(results, nil)
+
+	require.False(t, results[0].Success)
+	require.False(t, results[1].Success)
+	require.True(t, results[2].Success)
+	require.Equal(t, "duplicate_exit", results[0].HealthStatus)
+	require.Equal(t, "duplicate_exit", results[1].HealthStatus)
+	require.Equal(t, int64(12), *results[0].DuplicateOfNodeID)
+	require.Equal(t, int64(12), *results[1].DuplicateOfNodeID)
+	require.Nil(t, results[2].DuplicateOfNodeID)
+}
+
+func TestMarkDuplicateOpenCodeExitsKeepsExistingHealthyOwner(t *testing.T) {
+	results := []OpenCodeNodeProbeResult{
+		{NodeID: 11, Success: true, HealthStatus: "healthy", ExitIP: "203.0.113.10", LatencyMs: 100},
+		{NodeID: 12, Success: true, HealthStatus: "healthy", ExitIP: "203.0.113.10", LatencyMs: 200},
+	}
+
+	markDuplicateOpenCodeExits(results, map[string]int64{"203.0.113.10": 10})
+
+	for i := range results {
+		require.False(t, results[i].Success)
+		require.Equal(t, "duplicate_exit", results[i].HealthStatus)
+		require.Equal(t, int64(10), *results[i].DuplicateOfNodeID)
+	}
+}
+
+type duplicateCleanupRepoStub struct {
+	OpenCodeProxyPoolRepository
+	deleted []struct {
+		nodeID int64
+		reason string
+	}
+	errors map[int64]error
+}
+
+func (r *duplicateCleanupRepoStub) DeleteManagedNode(_ context.Context, nodeID int64, reason string) error {
+	r.deleted = append(r.deleted, struct {
+		nodeID int64
+		reason string
+	}{nodeID: nodeID, reason: reason})
+	return r.errors[nodeID]
+}
+
+func TestDeleteDuplicateProbeResultsDeletesOnlyLinkedDuplicates(t *testing.T) {
+	repo := &duplicateCleanupRepoStub{}
+	service := &OpenCodeProxyPoolService{repo: repo}
+	canonicalID := int64(10)
+	selfID := int64(14)
+
+	deleted, err := service.deleteDuplicateProbeResults(context.Background(), []OpenCodeNodeProbeResult{
+		{NodeID: canonicalID, HealthStatus: "healthy"},
+		{NodeID: 11, HealthStatus: "duplicate_exit", DuplicateOfNodeID: &canonicalID},
+		{NodeID: 12, HealthStatus: "duplicate_exit", DuplicateOfNodeID: &canonicalID},
+		{NodeID: 13, HealthStatus: "duplicate_exit"},
+		{NodeID: selfID, HealthStatus: "duplicate_exit", DuplicateOfNodeID: &selfID},
+		{NodeID: 11, HealthStatus: "duplicate_exit", DuplicateOfNodeID: &canonicalID},
+	})
+
+	require.NoError(t, err)
+	require.Equal(t, 2, deleted)
+	require.Equal(t, []struct {
+		nodeID int64
+		reason string
+	}{
+		{nodeID: 11, reason: "duplicate_exit"},
+		{nodeID: 12, reason: "duplicate_exit"},
+	}, repo.deleted)
+}
+
+func TestDeleteDuplicateProbeResultsContinuesAfterIndividualFailure(t *testing.T) {
+	repo := &duplicateCleanupRepoStub{errors: map[int64]error{11: errors.New("database busy")}}
+	service := &OpenCodeProxyPoolService{repo: repo}
+	canonicalID := int64(10)
+
+	deleted, err := service.deleteDuplicateProbeResults(context.Background(), []OpenCodeNodeProbeResult{
+		{NodeID: 11, HealthStatus: "duplicate_exit", DuplicateOfNodeID: &canonicalID},
+		{NodeID: 12, HealthStatus: "duplicate_exit", DuplicateOfNodeID: &canonicalID},
+	})
+
+	require.ErrorContains(t, err, "delete duplicate OpenCode node 11")
+	require.Equal(t, 1, deleted)
+	require.Len(t, repo.deleted, 2)
 }

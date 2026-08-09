@@ -267,7 +267,6 @@ export default {
         httpError: 'HTTP error',
         otherFailures: 'Other failures',
         duplicateExit: 'Duplicate exit',
-        viewNodesByStatus: 'View {status} nodes ({count})',
         autoRecoveryHint: 'Unhealthy workers are disabled automatically and retested every {minutes} minutes; recovered workers are re-enabled',
 		dailyMaintenanceHint: 'Full probe daily at 00:00; next run: {time}',
 		jobProgress: 'Job in progress: {processed} / {total}',

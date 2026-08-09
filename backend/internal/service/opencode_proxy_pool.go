@@ -1191,34 +1191,7 @@ func (s *OpenCodeProxyPoolService) probeNodesWithProgress(ctx context.Context, i
 			existingExitOwners[node.ExitIP] = node.ID
 		}
 	}
-	canonical := make(map[string]int)
-	for i := range results {
-		if !results[i].Success || results[i].ExitIP == "" {
-			continue
-		}
-		if ownerID, exists := existingExitOwners[results[i].ExitIP]; exists {
-			results[i].Success = false
-			results[i].HealthStatus = "duplicate_exit"
-			results[i].FailureType = "duplicate_exit"
-			results[i].DuplicateOfNodeID = &ownerID
-			continue
-		}
-		if first, exists := canonical[results[i].ExitIP]; exists {
-			winner := &results[first]
-			candidate := &results[i]
-			if candidate.LatencyMs < winner.LatencyMs {
-				winner, candidate = candidate, winner
-				canonical[results[i].ExitIP] = i
-			}
-			winnerID := winner.NodeID
-			candidate.Success = false
-			candidate.HealthStatus = "duplicate_exit"
-			candidate.FailureType = "duplicate_exit"
-			candidate.DuplicateOfNodeID = &winnerID
-		} else {
-			canonical[results[i].ExitIP] = i
-		}
-	}
+	markDuplicateOpenCodeExits(results, existingExitOwners)
 	if err := s.repo.UpdateNodeProbeResults(ctx, results); err != nil {
 		return nil, err
 	}
@@ -1233,10 +1206,74 @@ func (s *OpenCodeProxyPoolService) probeNodesWithProgress(ctx context.Context, i
 			}
 		}
 	}
-	if _, err := s.ReconcileWorkers(ctx); err != nil {
-		return nil, fmt.Errorf("reconcile OpenCode workers after probe: %w", err)
+	deletedDuplicates, deleteErr := s.deleteDuplicateProbeResults(ctx, results)
+	var reloadErr error
+	if deletedDuplicates > 0 {
+		reloadErr = s.reloadAfterManagedNodeDeletion(ctx)
+	}
+	_, reconcileErr := s.ReconcileWorkers(ctx)
+	if err := errors.Join(deleteErr, reloadErr, reconcileErr); err != nil {
+		return nil, fmt.Errorf("finalize OpenCode probe: %w", err)
 	}
 	return results, nil
+}
+
+func markDuplicateOpenCodeExits(results []OpenCodeNodeProbeResult, existingExitOwners map[string]int64) {
+	canonical := make(map[string]int)
+	for i := range results {
+		result := &results[i]
+		if !result.Success || result.ExitIP == "" {
+			continue
+		}
+		if _, exists := existingExitOwners[result.ExitIP]; exists {
+			continue
+		}
+		if winner, exists := canonical[result.ExitIP]; !exists || result.LatencyMs < results[winner].LatencyMs {
+			canonical[result.ExitIP] = i
+		}
+	}
+	for i := range results {
+		result := &results[i]
+		if !result.Success || result.ExitIP == "" {
+			continue
+		}
+		ownerID, hasExistingOwner := existingExitOwners[result.ExitIP]
+		if !hasExistingOwner {
+			winner, exists := canonical[result.ExitIP]
+			if !exists || winner == i {
+				continue
+			}
+			ownerID = results[winner].NodeID
+		}
+		result.Success = false
+		result.HealthStatus = "duplicate_exit"
+		result.FailureType = "duplicate_exit"
+		result.DuplicateOfNodeID = &ownerID
+	}
+}
+
+func (s *OpenCodeProxyPoolService) deleteDuplicateProbeResults(ctx context.Context, results []OpenCodeNodeProbeResult) (int, error) {
+	seen := make(map[int64]struct{})
+	deleted := 0
+	var cleanupErr error
+	for _, result := range results {
+		if result.NodeID <= 0 || result.HealthStatus != "duplicate_exit" || result.DuplicateOfNodeID == nil {
+			continue
+		}
+		if *result.DuplicateOfNodeID <= 0 || *result.DuplicateOfNodeID == result.NodeID {
+			continue
+		}
+		if _, exists := seen[result.NodeID]; exists {
+			continue
+		}
+		seen[result.NodeID] = struct{}{}
+		if err := s.repo.DeleteManagedNode(ctx, result.NodeID, "duplicate_exit"); err != nil {
+			cleanupErr = errors.Join(cleanupErr, fmt.Errorf("delete duplicate OpenCode node %d: %w", result.NodeID, err))
+			continue
+		}
+		deleted++
+	}
+	return deleted, cleanupErr
 }
 
 func (s *OpenCodeProxyPoolService) ValidateAccountEgress(ctx context.Context, account *Account, acquire bool) error {

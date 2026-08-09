@@ -17,7 +17,6 @@
     <OpenCodeProxyPool
       v-if="activeView !== 'standard'"
       :view="activeView"
-      @show-nodes="activeView = 'nodes'"
     />
     <TablePageLayout v-else class="pt-4">
       <template #filters>

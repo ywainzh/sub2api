@@ -716,10 +716,35 @@ func (r *openCodeProxyPoolRepository) ListOpenCodePoolWorkers(ctx context.Contex
 }
 
 type openCodeEligibleNode struct {
-	id      int64
-	proxyID int64
-	name    string
-	exitIP  string
+	id        int64
+	proxyID   int64
+	name      string
+	exitIP    string
+	latencyMs int64
+}
+
+const (
+	openCodeWorkerDefaultPriority = 50
+	openCodeWorkerLatencyBucketMs = int64(1000)
+)
+
+func openCodeWorkerPriority(latencyMs int64) int {
+	if latencyMs <= 0 {
+		return openCodeWorkerDefaultPriority
+	}
+	// One-second buckets prefer faster egresses while keeping enough workers at
+	// the same priority for the scheduler's load-aware and LRU balancing.
+	priority := latencyMs / openCodeWorkerLatencyBucketMs
+	if latencyMs%openCodeWorkerLatencyBucketMs != 0 {
+		priority++
+	}
+	if priority < 1 {
+		return 1
+	}
+	if priority > openCodeWorkerDefaultPriority {
+		return openCodeWorkerDefaultPriority
+	}
+	return int(priority)
 }
 
 func openCodeWorkerCredentials(apiKey string) string {
@@ -802,6 +827,7 @@ func (r *openCodeProxyPoolRepository) upsertOpenCodeWorkerAccount(
 	nodeID *int64,
 	proxyID *int64,
 	mode, name, exitIP, upstreamKey string,
+	priority int,
 ) (int64, int64, error) {
 	credentials := openCodeWorkerCredentials(upstreamKey)
 	extra := openCodeWorkerExtra(pool.ID, mode, nodeID)
@@ -810,10 +836,10 @@ func (r *openCodeProxyPoolRepository) upsertOpenCodeWorkerAccount(
 		result, err := tx.ExecContext(ctx, `
 			UPDATE accounts SET name=$2, platform='openai', type='apikey',
 				credentials=$3::jsonb, extra=$4::jsonb, proxy_id=$5,
-				concurrency=$6, rate_multiplier=0, status='active', schedulable=TRUE,
+				concurrency=$6, priority=$7, rate_multiplier=0, status='active', schedulable=TRUE,
 				error_message=NULL, auto_pause_on_expired=FALSE, updated_at=NOW()
 			WHERE id=$1 AND deleted_at IS NULL`,
-			*accountID, truncateRunes(name, 100), credentials, extra, proxyID, pool.WorkerConcurrency)
+			*accountID, truncateRunes(name, 100), credentials, extra, proxyID, pool.WorkerConcurrency, priority)
 		if err != nil {
 			return 0, 0, err
 		}
@@ -827,8 +853,8 @@ func (r *openCodeProxyPoolRepository) upsertOpenCodeWorkerAccount(
 				name, platform, type, credentials, extra, proxy_id,
 				concurrency, priority, rate_multiplier, status, schedulable,
 				auto_pause_on_expired
-			) VALUES ($1,'openai','apikey',$2::jsonb,$3::jsonb,$4,$5,50,0,'active',TRUE,FALSE)
-			RETURNING id`, truncateRunes(name, 100), credentials, extra, proxyID, pool.WorkerConcurrency).Scan(&resolvedAccountID); err != nil {
+			) VALUES ($1,'openai','apikey',$2::jsonb,$3::jsonb,$4,$5,$6,0,'active',TRUE,FALSE)
+			RETURNING id`, truncateRunes(name, 100), credentials, extra, proxyID, pool.WorkerConcurrency, priority).Scan(&resolvedAccountID); err != nil {
 			return 0, 0, err
 		}
 	}
@@ -837,8 +863,8 @@ func (r *openCodeProxyPoolRepository) upsertOpenCodeWorkerAccount(
 	}
 	if _, err := tx.ExecContext(ctx, `
 		INSERT INTO account_groups (account_id, group_id, priority)
-		VALUES ($1,$2,50) ON CONFLICT (account_id, group_id) DO UPDATE SET priority=EXCLUDED.priority`,
-		resolvedAccountID, pool.GroupID); err != nil {
+		VALUES ($1,$2,$3) ON CONFLICT (account_id, group_id) DO UPDATE SET priority=EXCLUDED.priority`,
+		resolvedAccountID, pool.GroupID, priority); err != nil {
 		return 0, 0, err
 	}
 	resolvedWorkerID := int64(0)
@@ -934,19 +960,19 @@ func (r *openCodeProxyPoolRepository) ReconcileOpenCodePoolWorkers(
 	eligible := make([]openCodeEligibleNode, 0)
 	if pool.Enabled {
 		nodeRows, err := tx.QueryContext(ctx, `
-			SELECT n.id, n.proxy_id, n.display_name, LOWER(n.exit_ip)
+			SELECT n.id, n.proxy_id, n.display_name, LOWER(n.exit_ip), COALESCE(n.latency_ms, 0)
 			FROM managed_proxy_nodes n
 			JOIN proxy_subscriptions s ON s.id=n.subscription_id AND s.deleted_at IS NULL AND s.enabled=TRUE
 			WHERE n.deleted_at IS NULL AND n.sync_status='active' AND n.health_status='healthy'
 				AND n.duplicate_of_node_id IS NULL AND NULLIF(BTRIM(n.exit_ip),'') IS NOT NULL
 				AND n.proxy_id IS NOT NULL AND n.last_probe_at >= NOW() - INTERVAL '26 hours'
-			ORDER BY n.id`)
+			ORDER BY n.latency_ms ASC NULLS LAST, n.id`)
 		if err != nil {
 			return nil, err
 		}
 		for nodeRows.Next() {
 			var node openCodeEligibleNode
-			if err := nodeRows.Scan(&node.id, &node.proxyID, &node.name, &node.exitIP); err != nil {
+			if err := nodeRows.Scan(&node.id, &node.proxyID, &node.name, &node.exitIP, &node.latencyMs); err != nil {
 				_ = nodeRows.Close()
 				return nil, err
 			}
@@ -976,6 +1002,7 @@ func (r *openCodeProxyPoolRepository) ReconcileOpenCodePoolWorkers(
 		resolvedWorkerID, _, err := r.upsertOpenCodeWorkerAccount(
 			ctx, tx, pool, workerID, accountID, &nodeID, &proxyID,
 			service.OpenCodeEgressModeProxy, "OpenCode / "+node.name, node.exitIP, upstreamKey,
+			openCodeWorkerPriority(node.latencyMs),
 		)
 		if err != nil {
 			return nil, err
@@ -1017,6 +1044,7 @@ func (r *openCodeProxyPoolRepository) ReconcileOpenCodePoolWorkers(
 					ctx, tx, pool, workerID, &adoptedAccountID, nil, nil,
 					service.OpenCodeEgressModeServerDirect, "OpenCode / Server Direct",
 					strings.ToLower(strings.TrimSpace(directProbe.ExitIP)), upstreamKey,
+					openCodeWorkerPriority(directProbe.LatencyMs),
 				)
 				if err != nil {
 					return nil, err
