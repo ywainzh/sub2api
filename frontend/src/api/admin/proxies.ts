@@ -36,6 +36,7 @@ export interface ProxySubscription {
   created_at: string
   updated_at: string
 	 source_type: 'url' | 'upload'
+	 expires_at?: string | null
 }
 
 export interface ManagedProxyNode {
@@ -456,11 +457,18 @@ export async function createOpenCodeProbeJob(nodeIds: number[] = []): Promise<Op
   return data
 }
 
-export async function importOpenCodeProxies(file: File, name?: string): Promise<OpenCodeMaintenanceJob> {
+export async function importOpenCodeProxies(
+  file: File,
+  name?: string,
+  expiresInDays?: number
+): Promise<OpenCodeMaintenanceJob> {
   const form = new FormData()
   form.append('file', file)
   if (name) form.append('name', name)
-  const { data } = await apiClient.post<OpenCodeMaintenanceJob>('/admin/opencode/proxies/import', form)
+  if (expiresInDays) form.append('expires_in_days', String(expiresInDays))
+  // postForm overrides the API client's JSON default while leaving the
+  // multipart boundary to Axios and the browser.
+  const { data } = await apiClient.postForm<OpenCodeMaintenanceJob>('/admin/opencode/proxies/import', form)
   return data
 }
 

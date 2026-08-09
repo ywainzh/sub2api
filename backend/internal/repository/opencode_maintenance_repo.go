@@ -102,10 +102,174 @@ func (r *openCodeProxyPoolRepository) ListRetryableNodeIDs(ctx context.Context, 
 	return ids, rows.Err()
 }
 
-func (r *openCodeProxyPoolRepository) CreateUploadedSubscription(ctx context.Context, name string) (*service.ProxySubscription, error) {
+func (r *openCodeProxyPoolRepository) CreateUploadedSubscription(ctx context.Context, name string, expiresAt *time.Time) (*service.ProxySubscription, error) {
 	return r.CreateSubscription(ctx, service.ProxySubscription{
-		Name: name, Enabled: true, SourceType: "upload", SyncIntervalMinutes: 360,
+		Name: name, Enabled: true, SourceType: "upload", SyncIntervalMinutes: 360, ExpiresAt: expiresAt,
 	})
+}
+
+func (r *openCodeProxyPoolRepository) DeleteExpiredUploadedSubscriptions(ctx context.Context, now time.Time) (service.ExpiredProxySourceCleanupResult, error) {
+	var summary service.ExpiredProxySourceCleanupResult
+	tx, err := r.db.BeginTx(ctx, nil)
+	if err != nil {
+		return summary, err
+	}
+	defer func() { _ = tx.Rollback() }()
+
+	var acquired bool
+	if err := tx.QueryRowContext(ctx, `SELECT pg_try_advisory_xact_lock(hashtext('opencode_upload_expiration_cleanup'))`).Scan(&acquired); err != nil {
+		return summary, err
+	}
+	if !acquired {
+		return summary, tx.Commit()
+	}
+
+	rows, err := tx.QueryContext(ctx, `
+		SELECT id FROM proxy_subscriptions
+		WHERE source_type='upload' AND expires_at IS NOT NULL AND expires_at <= $1 AND deleted_at IS NULL
+		ORDER BY expires_at, id FOR UPDATE`, now)
+	if err != nil {
+		return summary, err
+	}
+	subscriptionIDs := make([]int64, 0)
+	for rows.Next() {
+		var id int64
+		if err := rows.Scan(&id); err != nil {
+			_ = rows.Close()
+			return summary, err
+		}
+		subscriptionIDs = append(subscriptionIDs, id)
+	}
+	if err := rows.Close(); err != nil {
+		return summary, err
+	}
+	if len(subscriptionIDs) == 0 {
+		return summary, tx.Commit()
+	}
+	summary.Subscriptions = len(subscriptionIDs)
+
+	rows, err = tx.QueryContext(ctx, `
+		SELECT id, proxy_id FROM managed_proxy_nodes
+		WHERE subscription_id=ANY($1) AND deleted_at IS NULL FOR UPDATE`, pq.Array(subscriptionIDs))
+	if err != nil {
+		return summary, err
+	}
+	nodeIDs := make([]int64, 0)
+	proxyIDs := make([]int64, 0)
+	for rows.Next() {
+		var nodeID int64
+		var proxyID sql.NullInt64
+		if err := rows.Scan(&nodeID, &proxyID); err != nil {
+			_ = rows.Close()
+			return summary, err
+		}
+		nodeIDs = append(nodeIDs, nodeID)
+		if proxyID.Valid {
+			proxyIDs = append(proxyIDs, proxyID.Int64)
+		}
+	}
+	if err := rows.Close(); err != nil {
+		return summary, err
+	}
+	summary.Nodes = len(nodeIDs)
+
+	workerAccountIDs := make([]int64, 0)
+	if len(nodeIDs) > 0 {
+		rows, err = tx.QueryContext(ctx, `
+			SELECT account_id FROM opencode_pool_workers
+			WHERE managed_node_id=ANY($1) FOR UPDATE`, pq.Array(nodeIDs))
+		if err != nil {
+			return summary, err
+		}
+		for rows.Next() {
+			var accountID int64
+			if err := rows.Scan(&accountID); err != nil {
+				_ = rows.Close()
+				return summary, err
+			}
+			workerAccountIDs = append(workerAccountIDs, accountID)
+		}
+		if err := rows.Close(); err != nil {
+			return summary, err
+		}
+	}
+
+	accountIDs := append([]int64(nil), workerAccountIDs...)
+	if len(proxyIDs) > 0 {
+		rows, err = tx.QueryContext(ctx, `SELECT id FROM accounts WHERE proxy_id=ANY($1) FOR UPDATE`, pq.Array(proxyIDs))
+		if err != nil {
+			return summary, err
+		}
+		for rows.Next() {
+			var accountID int64
+			if err := rows.Scan(&accountID); err != nil {
+				_ = rows.Close()
+				return summary, err
+			}
+			accountIDs = append(accountIDs, accountID)
+		}
+		if err := rows.Close(); err != nil {
+			return summary, err
+		}
+	}
+	accountIDs = sortedUniqueAccountIDs(accountIDs)
+	workerAccountIDs = sortedUniqueAccountIDs(workerAccountIDs)
+	summary.Accounts = len(accountIDs)
+
+	if len(accountIDs) > 0 {
+		if _, err := tx.ExecContext(ctx, `DELETE FROM opencode_egress_leases WHERE account_id=ANY($1)`, pq.Array(accountIDs)); err != nil {
+			return summary, err
+		}
+		if _, err := tx.ExecContext(ctx, `
+			UPDATE accounts SET status='disabled', schedulable=FALSE, proxy_id=NULL,
+				error_message='proxy_source_expired', updated_at=NOW()
+			WHERE id=ANY($1)`, pq.Array(accountIDs)); err != nil {
+			return summary, err
+		}
+	}
+	if len(nodeIDs) > 0 {
+		if _, err := tx.ExecContext(ctx, `DELETE FROM opencode_pool_workers WHERE managed_node_id=ANY($1)`, pq.Array(nodeIDs)); err != nil {
+			return summary, err
+		}
+	}
+	if len(proxyIDs) > 0 {
+		if _, err := tx.ExecContext(ctx, `DELETE FROM opencode_egress_leases WHERE proxy_id=ANY($1)`, pq.Array(proxyIDs)); err != nil {
+			return summary, err
+		}
+	}
+	if len(workerAccountIDs) > 0 {
+		if _, err := tx.ExecContext(ctx, `UPDATE accounts SET deleted_at=COALESCE(deleted_at,NOW()) WHERE id=ANY($1)`, pq.Array(workerAccountIDs)); err != nil {
+			return summary, err
+		}
+	}
+	if err := enqueueProxyProbeAccountChanges(ctx, tx, accountIDs); err != nil {
+		return summary, err
+	}
+
+	if len(nodeIDs) > 0 {
+		if _, err := tx.ExecContext(ctx, `
+			UPDATE managed_proxy_nodes SET duplicate_of_node_id=NULL, health_status='unprobed',
+				retry_at=NOW(), updated_at=NOW()
+			WHERE duplicate_of_node_id=ANY($1) AND deleted_at IS NULL`, pq.Array(nodeIDs)); err != nil {
+			return summary, err
+		}
+		if _, err := tx.ExecContext(ctx, `DELETE FROM managed_proxy_nodes WHERE id=ANY($1)`, pq.Array(nodeIDs)); err != nil {
+			return summary, err
+		}
+	}
+	if len(proxyIDs) > 0 {
+		if _, err := tx.ExecContext(ctx, `DELETE FROM proxies WHERE id=ANY($1)`, pq.Array(proxyIDs)); err != nil {
+			return summary, err
+		}
+	}
+	if _, err := tx.ExecContext(ctx, `
+		UPDATE proxy_subscriptions SET enabled=FALSE, node_count=0, last_error='expired',
+			deleted_at=NOW(), updated_at=NOW()
+		WHERE id=ANY($1)`, pq.Array(subscriptionIDs)); err != nil {
+		return summary, err
+	}
+
+	return summary, tx.Commit()
 }
 
 func (r *openCodeProxyPoolRepository) CommitUploadedNodes(ctx context.Context, subscriptionID int64, drafts []service.ManagedProxyNodeDraft) error {

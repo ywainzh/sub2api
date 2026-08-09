@@ -4,6 +4,8 @@ import (
 	"context"
 	"testing"
 	"time"
+
+	"github.com/stretchr/testify/require"
 )
 
 func TestOpenCodeAdminOperationContextOutlivesClientCancellation(t *testing.T) {
@@ -26,5 +28,21 @@ func TestOpenCodeAdminOperationContextOutlivesClientCancellation(t *testing.T) {
 	remaining := time.Until(deadline)
 	if remaining < openCodeAdminOperationTimeout-time.Second || remaining > openCodeAdminOperationTimeout {
 		t.Fatalf("unexpected operation timeout: %s", remaining)
+	}
+}
+
+func TestParseOpenCodeImportExpiration(t *testing.T) {
+	now := time.Date(2026, time.August, 9, 12, 0, 0, 0, time.FixedZone("CST", 8*60*60))
+	expiresAt, err := parseOpenCodeImportExpiration("7", now)
+	require.NoError(t, err)
+	require.Equal(t, now.UTC().Add(7*24*time.Hour), *expiresAt)
+
+	expiresAt, err = parseOpenCodeImportExpiration("", now)
+	require.NoError(t, err)
+	require.Nil(t, expiresAt)
+
+	for _, value := range []string{"0", "3651", "seven"} {
+		_, err = parseOpenCodeImportExpiration(value, now)
+		require.Error(t, err, value)
 	}
 }

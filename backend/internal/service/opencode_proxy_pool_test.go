@@ -65,6 +65,8 @@ func TestOpenCodeShareLinkProtocols(t *testing.T) {
 		{"vless://11111111-1111-1111-1111-111111111111@vless.example.com:443#vless-node", "vless", "uuid", "11111111-1111-1111-1111-111111111111"},
 		{"trojan://trojan-password@trojan.example.com:443#trojan-node", "trojan", "password", "trojan-password"},
 		{"http://proxy-user:proxy-password@192.0.2.10:8080", "http", "username", "proxy-user"},
+		{"proxy-user:proxy-password@192.0.2.11:8081", "http", "username", "proxy-user"},
+		{"192.0.2.12:8082", "http", "server", "192.0.2.12"},
 	}
 	for _, test := range tests {
 		t.Run(test.protocol, func(t *testing.T) {
@@ -72,6 +74,16 @@ func TestOpenCodeShareLinkProtocols(t *testing.T) {
 			require.NoError(t, parseErr)
 			require.Equal(t, test.protocol, proxy["type"])
 			require.Equal(t, test.value, proxy[test.field])
+		})
+	}
+}
+
+func TestOpenCodeShareLinkRejectsInvalidSchemeLessHTTPProxy(t *testing.T) {
+	tests := []string{"", "not-a-proxy", "user:password@missing-port"}
+	for _, input := range tests {
+		t.Run(input, func(t *testing.T) {
+			_, err := openCodeShareLinkToMihomo(input)
+			require.Error(t, err)
 		})
 	}
 }

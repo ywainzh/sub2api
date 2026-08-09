@@ -28,14 +28,14 @@ const proxySubscriptionColumns = `
 	id, name, COALESCE(url_ciphertext, ''), enabled, sync_interval_minutes,
 	last_fetched_at, last_success_at, COALESCE(last_error, ''), node_count,
 	COALESCE(last_format, ''), COALESCE(last_user_agent, ''), created_at, updated_at,
-	COALESCE(source_type, 'url')`
+	COALESCE(source_type, 'url'), expires_at`
 
 func scanProxySubscription(scanner interface{ Scan(...any) error }) (*service.ProxySubscription, error) {
 	var item service.ProxySubscription
 	if err := scanner.Scan(
 		&item.ID, &item.Name, &item.URLCiphertext, &item.Enabled, &item.SyncIntervalMinutes,
 		&item.LastFetchedAt, &item.LastSuccessAt, &item.LastError, &item.NodeCount,
-		&item.LastFormat, &item.LastUserAgent, &item.CreatedAt, &item.UpdatedAt, &item.SourceType,
+		&item.LastFormat, &item.LastUserAgent, &item.CreatedAt, &item.UpdatedAt, &item.SourceType, &item.ExpiresAt,
 	); err != nil {
 		return nil, err
 	}
@@ -71,9 +71,9 @@ func (r *openCodeProxyPoolRepository) GetSubscription(ctx context.Context, id in
 
 func (r *openCodeProxyPoolRepository) CreateSubscription(ctx context.Context, input service.ProxySubscription) (*service.ProxySubscription, error) {
 	return scanProxySubscription(r.db.QueryRowContext(ctx, `
-		INSERT INTO proxy_subscriptions (name, url_ciphertext, enabled, sync_interval_minutes, source_type)
-		VALUES ($1,NULLIF($2,''),$3,$4,COALESCE(NULLIF($5,''),'url')) RETURNING `+proxySubscriptionColumns,
-		input.Name, input.URLCiphertext, input.Enabled, input.SyncIntervalMinutes, input.SourceType,
+		INSERT INTO proxy_subscriptions (name, url_ciphertext, enabled, sync_interval_minutes, source_type, expires_at)
+		VALUES ($1,NULLIF($2,''),$3,$4,COALESCE(NULLIF($5,''),'url'),$6) RETURNING `+proxySubscriptionColumns,
+		input.Name, input.URLCiphertext, input.Enabled, input.SyncIntervalMinutes, input.SourceType, input.ExpiresAt,
 	))
 }
 

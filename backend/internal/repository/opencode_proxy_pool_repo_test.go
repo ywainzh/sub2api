@@ -111,6 +111,73 @@ func TestDeleteManagedNodeCreatesTombstoneAndPhysicallyRemovesProxy(t *testing.T
 	require.NoError(t, mock.ExpectationsWereMet())
 }
 
+func TestDeleteExpiredUploadedSubscriptionsCleansWorkersLeasesAndProxies(t *testing.T) {
+	db, mock, err := sqlmock.New(sqlmock.QueryMatcherOption(sqlmock.QueryMatcherRegexp))
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = db.Close() })
+	now := time.Date(2026, time.August, 16, 12, 0, 0, 0, time.UTC)
+
+	mock.ExpectBegin()
+	mock.ExpectQuery(`SELECT pg_try_advisory_xact_lock`).
+		WillReturnRows(sqlmock.NewRows([]string{"locked"}).AddRow(true))
+	mock.ExpectQuery(`SELECT id FROM proxy_subscriptions`).
+		WithArgs(now).
+		WillReturnRows(sqlmock.NewRows([]string{"id"}).AddRow(9))
+	mock.ExpectQuery(`SELECT id, proxy_id FROM managed_proxy_nodes`).
+		WithArgs(sqlmock.AnyArg()).
+		WillReturnRows(sqlmock.NewRows([]string{"id", "proxy_id"}).AddRow(28, 40))
+	mock.ExpectQuery(`SELECT account_id FROM opencode_pool_workers`).
+		WithArgs(sqlmock.AnyArg()).
+		WillReturnRows(sqlmock.NewRows([]string{"account_id"}).AddRow(70))
+	mock.ExpectQuery(`SELECT id FROM accounts WHERE proxy_id=ANY`).
+		WithArgs(sqlmock.AnyArg()).
+		WillReturnRows(sqlmock.NewRows([]string{"id"}).AddRow(70))
+	mock.ExpectExec(`DELETE FROM opencode_egress_leases WHERE account_id=ANY`).
+		WithArgs(sqlmock.AnyArg()).WillReturnResult(sqlmock.NewResult(0, 1))
+	mock.ExpectExec(`UPDATE accounts SET status='disabled'`).
+		WithArgs(sqlmock.AnyArg()).WillReturnResult(sqlmock.NewResult(0, 1))
+	mock.ExpectExec(`DELETE FROM opencode_pool_workers WHERE managed_node_id=ANY`).
+		WithArgs(sqlmock.AnyArg()).WillReturnResult(sqlmock.NewResult(0, 1))
+	mock.ExpectExec(`DELETE FROM opencode_egress_leases WHERE proxy_id=ANY`).
+		WithArgs(sqlmock.AnyArg()).WillReturnResult(sqlmock.NewResult(0, 0))
+	mock.ExpectExec(`UPDATE accounts SET deleted_at=COALESCE`).
+		WithArgs(sqlmock.AnyArg()).WillReturnResult(sqlmock.NewResult(0, 1))
+	mock.ExpectExec(`INSERT INTO scheduler_outbox`).
+		WithArgs(service.SchedulerOutboxEventAccountBulkChanged, nil, nil, sqlmock.AnyArg()).
+		WillReturnResult(sqlmock.NewResult(1, 1))
+	mock.ExpectExec(`UPDATE managed_proxy_nodes SET duplicate_of_node_id=NULL`).
+		WithArgs(sqlmock.AnyArg()).WillReturnResult(sqlmock.NewResult(0, 0))
+	mock.ExpectExec(`DELETE FROM managed_proxy_nodes WHERE id=ANY`).
+		WithArgs(sqlmock.AnyArg()).WillReturnResult(sqlmock.NewResult(0, 1))
+	mock.ExpectExec(`DELETE FROM proxies WHERE id=ANY`).
+		WithArgs(sqlmock.AnyArg()).WillReturnResult(sqlmock.NewResult(0, 1))
+	mock.ExpectExec(`UPDATE proxy_subscriptions SET enabled=FALSE`).
+		WithArgs(sqlmock.AnyArg()).WillReturnResult(sqlmock.NewResult(0, 1))
+	mock.ExpectCommit()
+
+	repo := &openCodeProxyPoolRepository{db: db}
+	result, err := repo.DeleteExpiredUploadedSubscriptions(context.Background(), now)
+	require.NoError(t, err)
+	require.Equal(t, service.ExpiredProxySourceCleanupResult{Subscriptions: 1, Nodes: 1, Accounts: 1}, result)
+	require.NoError(t, mock.ExpectationsWereMet())
+}
+
+func TestDeleteExpiredUploadedSubscriptionsSkipsWhenAnotherInstanceOwnsLock(t *testing.T) {
+	db, mock, err := sqlmock.New(sqlmock.QueryMatcherOption(sqlmock.QueryMatcherRegexp))
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = db.Close() })
+	mock.ExpectBegin()
+	mock.ExpectQuery(`SELECT pg_try_advisory_xact_lock`).
+		WillReturnRows(sqlmock.NewRows([]string{"locked"}).AddRow(false))
+	mock.ExpectCommit()
+
+	repo := &openCodeProxyPoolRepository{db: db}
+	result, err := repo.DeleteExpiredUploadedSubscriptions(context.Background(), time.Now())
+	require.NoError(t, err)
+	require.Zero(t, result.Subscriptions)
+	require.NoError(t, mock.ExpectationsWereMet())
+}
+
 func TestAcquireOpenCodeWorkerLeasePreservesExistingLeaseOrdering(t *testing.T) {
 	db, mock, err := sqlmock.New(sqlmock.QueryMatcherOption(sqlmock.QueryMatcherRegexp))
 	require.NoError(t, err)

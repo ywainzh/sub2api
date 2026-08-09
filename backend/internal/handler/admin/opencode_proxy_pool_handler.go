@@ -19,6 +19,19 @@ import (
 const openCodeAdminOperationTimeout = 10 * time.Minute
 const openCodeProxyImportMaxBytes = int64(2 << 20)
 
+func parseOpenCodeImportExpiration(raw string, now time.Time) (*time.Time, error) {
+	raw = strings.TrimSpace(raw)
+	if raw == "" {
+		return nil, nil
+	}
+	days, err := strconv.Atoi(raw)
+	if err != nil || days < 1 || days > 3650 {
+		return nil, errors.New("expiration days must be between 1 and 3650")
+	}
+	value := now.UTC().Add(time.Duration(days) * 24 * time.Hour)
+	return &value, nil
+}
+
 // Long-running subscription and probe operations must finish persisting their
 // results even if the browser or a reverse proxy closes the HTTP request. The
 // bounded detached context retains request values but does not inherit client
@@ -259,7 +272,12 @@ func (h *ProxyHandler) ImportOpenCodeProxies(c *gin.Context) {
 	if sourceName == "" {
 		sourceName = strings.TrimSuffix(filepath.Base(fileHeader.Filename), filepath.Ext(fileHeader.Filename))
 	}
-	job, err := pool.StartProxyImport(c.Request.Context(), sourceName, data)
+	expiresAt, err := parseOpenCodeImportExpiration(c.PostForm("expires_in_days"), time.Now())
+	if err != nil {
+		response.BadRequest(c, err.Error())
+		return
+	}
+	job, err := pool.StartProxyImport(c.Request.Context(), sourceName, data, expiresAt)
 	if err != nil {
 		response.BadRequest(c, err.Error())
 		return

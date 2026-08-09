@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"log/slog"
 	"os"
 	"path/filepath"
 	"strings"
@@ -150,7 +151,7 @@ func (s *OpenCodeProxyPoolService) runProbeJob(job *OpenCodeMaintenanceJob, ids 
 	_ = s.repo.UpdateMaintenanceJob(context.Background(), *job)
 }
 
-func (s *OpenCodeProxyPoolService) StartProxyImport(ctx context.Context, sourceName string, data []byte) (*OpenCodeMaintenanceJob, error) {
+func (s *OpenCodeProxyPoolService) StartProxyImport(ctx context.Context, sourceName string, data []byte, expiresAt *time.Time) (*OpenCodeMaintenanceJob, error) {
 	fields := strings.Fields(string(data))
 	if len(fields) == 0 {
 		return nil, errors.New("proxy import file is empty")
@@ -165,6 +166,16 @@ func (s *OpenCodeProxyPoolService) StartProxyImport(ctx context.Context, sourceN
 	if runes := []rune(sourceName); len(runes) > 100 {
 		sourceName = string(runes[:100])
 	}
+	if expiresAt != nil {
+		normalized := expiresAt.UTC()
+		if !normalized.After(time.Now()) {
+			return nil, errors.New("proxy import expiration must be in the future")
+		}
+		if normalized.After(time.Now().AddDate(10, 0, 0)) {
+			return nil, errors.New("proxy import expiration must not exceed 10 years")
+		}
+		expiresAt = &normalized
+	}
 	job, err := s.repo.CreateMaintenanceJob(ctx, OpenCodeMaintenanceJob{
 		JobType: "import", TriggerType: "manual", Status: "pending",
 		SourceName: sourceName, TotalNodes: len(fields),
@@ -173,11 +184,11 @@ func (s *OpenCodeProxyPoolService) StartProxyImport(ctx context.Context, sourceN
 		return nil, err
 	}
 	copyData := append([]byte(nil), data...)
-	go s.runProxyImport(job, copyData)
+	go s.runProxyImport(job, copyData, expiresAt)
 	return job, nil
 }
 
-func (s *OpenCodeProxyPoolService) runProxyImport(job *OpenCodeMaintenanceJob, data []byte) {
+func (s *OpenCodeProxyPoolService) runProxyImport(job *OpenCodeMaintenanceJob, data []byte, expiresAt *time.Time) {
 	ctx, cancel := context.WithTimeout(context.Background(), 6*time.Hour)
 	defer cancel()
 	claimed, claimErr := s.repo.ClaimMaintenanceJob(ctx, job.ID)
@@ -192,7 +203,7 @@ func (s *OpenCodeProxyPoolService) runProxyImport(job *OpenCodeMaintenanceJob, d
 		_ = s.repo.UpdateMaintenanceJob(context.Background(), *job)
 	}
 
-	subscription, err := s.repo.CreateUploadedSubscription(ctx, job.SourceName)
+	subscription, err := s.repo.CreateUploadedSubscription(ctx, job.SourceName, expiresAt)
 	if err != nil {
 		fail(err)
 		return
@@ -283,6 +294,19 @@ func (s *OpenCodeProxyPoolService) runProxyImport(job *OpenCodeMaintenanceJob, d
 		job.Status = "completed"
 	}
 	_ = s.repo.UpdateMaintenanceJob(context.Background(), *job)
+}
+
+func (s *OpenCodeProxyPoolService) CleanupExpiredUploadedSubscriptions(ctx context.Context) (ExpiredProxySourceCleanupResult, error) {
+	result, err := s.repo.DeleteExpiredUploadedSubscriptions(ctx, time.Now())
+	if err != nil || result.Subscriptions == 0 {
+		return result, err
+	}
+	slog.Info("opencode_uploaded_proxy_sources_expired",
+		"subscriptions", result.Subscriptions,
+		"nodes", result.Nodes,
+		"accounts", result.Accounts,
+	)
+	return result, nil
 }
 
 func (s *OpenCodeProxyPoolService) DeleteManagedNode(ctx context.Context, nodeID int64) error {

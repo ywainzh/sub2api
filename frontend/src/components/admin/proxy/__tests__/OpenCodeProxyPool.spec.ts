@@ -244,6 +244,50 @@ describe('OpenCodeProxyPool subscription save flow', () => {
     expect(subscriptionURL.attributes('data-bwignore')).toBe('true')
   })
 
+  it('imports a short-lived proxy source with a selected seven-day validity', async () => {
+    api.importOpenCodeProxies.mockResolvedValue({ id: 18, status: 'pending', processed_nodes: 0, total_nodes: 1 })
+    api.getOpenCodeMaintenanceJob.mockResolvedValue({
+      id: 18,
+      status: 'completed',
+      processed_nodes: 1,
+      total_nodes: 1,
+      healthy_nodes: 1,
+      failed_nodes: 0,
+      rate_limited_nodes: 0,
+      duplicate_nodes: 0
+    })
+    const wrapper = mount(OpenCodeProxyPool, {
+      props: { view: 'subscriptions' },
+      global: {
+        stubs: {
+          Icon: true,
+          BaseDialog: {
+            props: ['show'],
+            template: '<div v-if="show"><slot /><slot name="footer" /></div>'
+          }
+        }
+      }
+    })
+    await flushPromises()
+
+    const importButton = wrapper.findAll('button').find((button) =>
+      button.text().includes('admin.proxies.openCode.importNodes')
+    )
+    await importButton!.trigger('click')
+    const file = new File(['http://user:password@192.0.2.10:3129'], 'proxyscrape-trial.txt', {
+      type: 'text/plain'
+    })
+    const fileInput = wrapper.get('#opencode-import-file')
+    Object.defineProperty(fileInput.element, 'files', { configurable: true, value: [file] })
+    await fileInput.trigger('change')
+    await wrapper.get('#opencode-import-validity').setValue('7')
+    await wrapper.get('#opencode-import-form').trigger('submit')
+    await flushPromises()
+
+    expect(api.importOpenCodeProxies).toHaveBeenCalledWith(file, 'proxyscrape-trial', 7)
+    expect(api.getOpenCodeMaintenanceJob).toHaveBeenCalledWith(18)
+  })
+
   it('shows honest progress immediately and summarizes the completed batch', async () => {
 	vi.useFakeTimers()
     api.listSubscriptions.mockResolvedValue([createdSubscription])

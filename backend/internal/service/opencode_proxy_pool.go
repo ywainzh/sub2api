@@ -71,6 +71,13 @@ type ProxySubscription struct {
 	UpdatedAt           time.Time  `json:"updated_at"`
 	URLCiphertext       string     `json:"-"`
 	SourceType          string     `json:"source_type"`
+	ExpiresAt           *time.Time `json:"expires_at,omitempty"`
+}
+
+type ExpiredProxySourceCleanupResult struct {
+	Subscriptions int
+	Nodes         int
+	Accounts      int
 }
 
 type ManagedProxyNode struct {
@@ -236,8 +243,9 @@ type OpenCodeProxyPoolRepository interface {
 	GetMaintenanceJob(context.Context, int64) (*OpenCodeMaintenanceJob, error)
 	GetLatestMaintenanceJob(context.Context) (*OpenCodeMaintenanceJob, error)
 	ListRetryableNodeIDs(context.Context, time.Time, int) ([]int64, error)
-	CreateUploadedSubscription(context.Context, string) (*ProxySubscription, error)
+	CreateUploadedSubscription(context.Context, string, *time.Time) (*ProxySubscription, error)
 	CommitUploadedNodes(context.Context, int64, []ManagedProxyNodeDraft) error
+	DeleteExpiredUploadedSubscriptions(context.Context, time.Time) (ExpiredProxySourceCleanupResult, error)
 	DeleteManagedNode(context.Context, int64, string) error
 	ListTombstonedNodeKeys(context.Context, int64) (map[string]struct{}, error)
 	ReconcileEgressLeases(context.Context) ([]int64, error)
@@ -322,8 +330,13 @@ func (s *OpenCodeProxyPoolService) Start() {
 		_ = s.LoadModelSnapshot(bootstrapCtx)
 		if _, err := s.BootstrapPool(bootstrapCtx); err != nil {
 			slog.Warn("opencode_pool_bootstrap_failed", "error", err)
-		} else if _, err := s.ReconcileWorkers(bootstrapCtx); err != nil {
-			slog.Warn("opencode_pool_initial_reconcile_failed", "error", err)
+		} else {
+			if _, err := s.CleanupExpiredUploadedSubscriptions(bootstrapCtx); err != nil {
+				slog.Warn("opencode_expired_source_initial_cleanup_failed", "error", err)
+			}
+			if _, err := s.ReconcileWorkers(bootstrapCtx); err != nil {
+				slog.Warn("opencode_pool_initial_reconcile_failed", "error", err)
+			}
 		}
 		bootstrapCancel()
 		refreshCtx, refreshCancel := context.WithTimeout(context.Background(), 30*time.Second)
@@ -351,6 +364,14 @@ func (s *OpenCodeProxyPoolService) Start() {
 				s.startRetryProbes()
 			case <-syncTicker.C:
 				ctx, cancel := context.WithTimeout(context.Background(), 10*time.Minute)
+				cleanup, err := s.CleanupExpiredUploadedSubscriptions(ctx)
+				if err != nil {
+					slog.Warn("opencode_expired_source_cleanup_failed", "error", err)
+				} else if cleanup.Subscriptions > 0 {
+					if _, err := s.ReconcileWorkers(ctx); err != nil {
+						slog.Warn("opencode_expired_source_reconcile_failed", "error", err)
+					}
+				}
 				s.SyncDueSubscriptions(ctx)
 				cancel()
 			case <-s.stop:
@@ -585,6 +606,16 @@ func parseOpenCodeShareLinks(payload string) ([]map[string]any, error) {
 }
 
 func openCodeShareLinkToMihomo(raw string) (map[string]any, error) {
+	raw = strings.TrimSpace(raw)
+	if raw == "" {
+		return nil, errors.New("invalid share link")
+	}
+	// HTTP proxy lists commonly omit the URL scheme and use either
+	// username:password@host:port or host:port. Treat those entries as HTTP
+	// proxies while keeping explicit share-link protocols unchanged.
+	if !strings.Contains(raw, "://") {
+		raw = "http://" + raw
+	}
 	if strings.HasPrefix(strings.ToLower(raw), "vmess://") {
 		decoded, err := decodeBase64Flexible(strings.TrimPrefix(raw, "vmess://"))
 		if err != nil {

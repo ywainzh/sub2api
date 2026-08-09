@@ -87,22 +87,11 @@
           <Icon name="plus" size="md" class="mr-2" />
           {{ t('admin.proxies.openCode.addSubscription') }}
         </button>
-		<input ref="importFileInput" type="file" accept=".txt,text/plain" class="hidden" @change="importProxyFile" />
-		<button class="btn btn-secondary" :disabled="importing" type="button" @click="importFileInput?.click()">
+		<button class="btn btn-secondary" :disabled="importing" type="button" @click="openImportDialog">
 		  <Icon :name="importing ? 'refresh' : 'upload'" size="md" class="mr-2" :class="importing ? 'animate-spin' : ''" />
 		  {{ importing ? t('admin.proxies.openCode.importing') : t('admin.proxies.openCode.importNodes') }}
 		</button>
-        <div class="ml-auto flex items-center gap-2 text-xs text-gray-500 dark:text-gray-400">
-          <span>{{
-            t('admin.proxies.openCode.freeModels', {
-              count: modelStatus?.count ?? 0
-            })
-          }}</span>
-          <button class="btn btn-secondary btn-sm" :disabled="refreshingModels" @click="refreshModels">
-            <Icon name="refresh" size="sm" :class="refreshingModels ? 'animate-spin' : ''" />
-          </button>
-        </div>
-      </template>
+	  </template>
       <template v-else>
         <select v-model="healthFilter" class="input w-52" @change="handleHealthFilterChange">
           <option value="">{{ t('admin.proxies.openCode.allHealth') }}</option>
@@ -184,6 +173,7 @@
             <th class="px-4 py-3">
               {{ t('admin.proxies.openCode.lastSync') }}
             </th>
+			<th class="px-4 py-3">{{ t('admin.proxies.openCode.expiresAt') }}</th>
             <th class="px-4 py-3">{{ t('admin.proxies.columns.status') }}</th>
             <th class="px-4 py-3 text-right">
               {{ t('admin.proxies.columns.actions') }}
@@ -214,6 +204,9 @@
                 {{ subscription.last_error }}
               </div>
             </td>
+			<td class="px-4 py-3 text-gray-700 dark:text-gray-200">
+			  {{ subscription.expires_at ? displayTime(subscription.expires_at) : t('admin.proxies.openCode.neverExpires') }}
+			</td>
             <td class="px-4 py-3">
               <button
                 class="badge"
@@ -458,6 +451,64 @@
         </div>
       </template>
     </BaseDialog>
+
+	<BaseDialog
+	  :show="showImportDialog"
+	  :title="t('admin.proxies.openCode.importDialogTitle')"
+	  width="normal"
+	  :close-on-escape="!importing"
+	  @close="closeImportDialog"
+	>
+	  <form id="opencode-import-form" class="space-y-5" @submit.prevent="submitProxyImport">
+		<div>
+		  <label class="input-label" for="opencode-import-file">{{ t('admin.proxies.openCode.proxyFile') }}</label>
+		  <input
+			id="opencode-import-file"
+			class="input"
+			type="file"
+			accept=".txt,text/plain"
+			required
+			:disabled="importing"
+			@change="selectImportFile"
+		  />
+		</div>
+		<div>
+		  <label class="input-label" for="opencode-import-name">{{ t('admin.proxies.openCode.importSourceName') }}</label>
+		  <input
+			id="opencode-import-name"
+			v-model="importForm.name"
+			class="input"
+			type="text"
+			maxlength="100"
+			:disabled="importing"
+			:placeholder="t('admin.proxies.openCode.importSourceNameHint')"
+		  />
+		</div>
+		<div>
+		  <label class="input-label" for="opencode-import-validity">{{ t('admin.proxies.openCode.importValidity') }}</label>
+		  <select id="opencode-import-validity" v-model="importForm.expires_in_days" class="input" :disabled="importing">
+			<option value="">{{ t('admin.proxies.openCode.neverExpires') }}</option>
+			<option value="1">1 {{ t('admin.proxies.openCode.days') }}</option>
+			<option value="3">3 {{ t('admin.proxies.openCode.days') }}</option>
+			<option value="7">7 {{ t('admin.proxies.openCode.days') }}</option>
+			<option value="30">30 {{ t('admin.proxies.openCode.days') }}</option>
+			<option value="90">90 {{ t('admin.proxies.openCode.days') }}</option>
+		  </select>
+		  <p class="mt-1.5 text-xs text-gray-500 dark:text-gray-400">{{ t('admin.proxies.openCode.importExpirationHint') }}</p>
+		</div>
+	  </form>
+	  <template #footer>
+		<div class="flex justify-end gap-2">
+		  <button class="btn btn-secondary" type="button" :disabled="importing" @click="closeImportDialog">
+			{{ t('common.cancel') }}
+		  </button>
+		  <button class="btn btn-primary" type="submit" form="opencode-import-form" :disabled="importing || !importFile">
+			<Icon v-if="importing" name="refresh" size="sm" class="mr-2 animate-spin" />
+			{{ importing ? t('admin.proxies.openCode.importing') : t('admin.proxies.openCode.startImport') }}
+		  </button>
+		</div>
+	  </template>
+	</BaseDialog>
   </div>
 </template>
 
@@ -469,7 +520,6 @@ import type {
   ManagedProxyNode,
 	OpenCodeMaintenanceJob,
 	OpenCodeMaintenanceStatus,
-  OpenCodeModelRegistryStatus,
   OpenCodeNodeProbeResult,
   OpenCodePool,
   OpenCodePoolWorker,
@@ -487,7 +537,6 @@ const { t } = useI18n()
 const appStore = useAppStore()
 const subscriptions = ref<ProxySubscription[]>([])
 const nodes = ref<ManagedProxyNode[]>([])
-const modelStatus = ref<OpenCodeModelRegistryStatus | null>(null)
 const pool = ref<OpenCodePool | null>(null)
 const workers = ref<OpenCodePoolWorker[]>([])
 const loading = ref(false)
@@ -498,8 +547,9 @@ const probeElapsedSeconds = ref(0)
 	const activeJob = ref<OpenCodeMaintenanceJob | null>(null)
 	const maintenance = ref<OpenCodeMaintenanceStatus | null>(null)
 	const importing = ref(false)
-	const importFileInput = ref<HTMLInputElement | null>(null)
-const refreshingModels = ref(false)
+	const showImportDialog = ref(false)
+	const importFile = ref<File | null>(null)
+	const importForm = reactive({ name: '', expires_in_days: '' })
 const syncingIds = ref(new Set<number>())
 const initialPageSize = getPersistedPageSize()
 const subscriptionPagination = reactive({ page: 1, page_size: initialPageSize })
@@ -681,9 +731,7 @@ async function loadAll() {
         subscriptions.value.map((item) => adminAPI.proxies.listSubscriptionNodes(item.id))
       )
       nodes.value = batches.flat()
-    } else {
-      modelStatus.value = await adminAPI.proxies.getOpenCodeModels()
-    }
+	}
   } catch (error) {
     appStore.showError(errorMessage(error))
   } finally {
@@ -892,20 +940,38 @@ async function initialLoad() {
 	}
 }
 
-async function importProxyFile(event: Event) {
+function openImportDialog() {
+	importFile.value = null
+	Object.assign(importForm, { name: '', expires_in_days: '' })
+	showImportDialog.value = true
+}
+
+function closeImportDialog() {
+	if (!importing.value) showImportDialog.value = false
+}
+
+function selectImportFile(event: Event) {
 	const input = event.target as HTMLInputElement
-	const file = input.files?.[0]
+	importFile.value = input.files?.[0] ?? null
+	if (importFile.value && !importForm.name) {
+		importForm.name = importFile.value.name.replace(/\.[^.]+$/, '')
+	}
+}
+
+async function submitProxyImport() {
+	const file = importFile.value
 	if (!file || importing.value) return
 	importing.value = true
 	probing.value = true
 	startProbeProgress([])
 	try {
-		activeJob.value = await adminAPI.proxies.importOpenCodeProxies(file)
+		const days = importForm.expires_in_days ? Number(importForm.expires_in_days) : undefined
+		activeJob.value = await adminAPI.proxies.importOpenCodeProxies(file, importForm.name.trim() || undefined, days)
+		showImportDialog.value = false
 		await pollMaintenanceJob(activeJob.value.id)
 	} catch (error) {
 		appStore.showError(errorMessage(error))
 	} finally {
-		input.value = ''
 		importing.value = false
 		probing.value = false
 		activeJob.value = null
@@ -927,17 +993,6 @@ async function deleteNode(node: ManagedProxyNode) {
 		next.delete(node.id)
 		deletingNodeIds.value = next
 	}
-}
-
-async function refreshModels() {
-  refreshingModels.value = true
-  try {
-    modelStatus.value = await adminAPI.proxies.refreshOpenCodeModels()
-  } catch (error) {
-    appStore.showError(errorMessage(error))
-  } finally {
-    refreshingModels.value = false
-  }
 }
 
 watch(() => subscriptions.value.length, (total) => clampPage(total, subscriptionPagination))
