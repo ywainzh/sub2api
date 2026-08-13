@@ -9,6 +9,7 @@ import {
 const translate = (key: string) => ({
   'usage.clientSourceCodex': 'Codex',
   'usage.clientSourceClaude': 'Claude',
+  'usage.clientSourcePi': 'Pi',
   'usage.clientSourceUnknown': 'Unknown',
 })[key] ?? key
 
@@ -16,6 +17,7 @@ describe('usageClientSource utils', () => {
   it('normalizes supported values and falls back to unknown', () => {
     expect(normalizeUsageClientSource('codex')).toBe('codex')
     expect(normalizeUsageClientSource('claude')).toBe('claude')
+    expect(normalizeUsageClientSource('pi')).toBe('pi')
     expect(normalizeUsageClientSource('other')).toBe('unknown')
     expect(normalizeUsageClientSource()).toBe('unknown')
   })
@@ -23,12 +25,14 @@ describe('usageClientSource utils', () => {
   it('maps sources to translated labels', () => {
     expect(getUsageClientSourceLabel('codex', translate)).toBe('Codex')
     expect(getUsageClientSourceLabel('claude', translate)).toBe('Claude')
+    expect(getUsageClientSourceLabel('pi', translate)).toBe('Pi')
     expect(getUsageClientSourceLabel('unknown', translate)).toBe('Unknown')
   })
 
   it('uses distinct accessible badge palettes', () => {
     expect(getUsageClientSourceBadgeClass('codex')).toContain('bg-blue-100')
     expect(getUsageClientSourceBadgeClass('claude')).toContain('bg-orange-100')
+    expect(getUsageClientSourceBadgeClass('pi')).toContain('bg-violet-100')
     expect(getUsageClientSourceBadgeClass('unknown')).toContain('bg-gray-100')
   })
 })

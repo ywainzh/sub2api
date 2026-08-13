@@ -298,6 +298,7 @@ export default {
     clientSource: 'Source',
     clientSourceCodex: 'Codex',
     clientSourceClaude: 'Claude',
+    clientSourcePi: 'Pi',
     clientSourceUnknown: 'Unknown',
     requestedModel: 'Requested',
     upstreamModel: 'Upstream',

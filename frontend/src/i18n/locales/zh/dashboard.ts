@@ -303,6 +303,7 @@ export default {
     clientSource: '来源',
     clientSourceCodex: 'Codex',
     clientSourceClaude: 'Claude',
+    clientSourcePi: 'Pi',
     clientSourceUnknown: '未知',
     requestedModel: '请求',
     upstreamModel: '上游',

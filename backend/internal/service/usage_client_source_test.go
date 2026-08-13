@@ -24,8 +24,11 @@ func TestDetectUsageClientSource(t *testing.T) {
 		{name: "claude cli family prefix", userAgent: "claude-cli/dev", want: UsageClientSourceClaude},
 		{name: "claude code codex plugin", userAgent: "Claude Code/0.5.0 (Macos 15.5; arm64) iTerm2.app (Claude Code; 1.0.4)", want: UsageClientSourceClaude},
 		{name: "claude takes precedence over codex trailer", userAgent: "Claude Code/0.5.0 (Macos) (codex_cli_rs; 0.144.1)", want: UsageClientSourceClaude},
+		{name: "pi anthropic js sdk", userAgent: "Anthropic/JS 0.91.1", want: UsageClientSourcePi},
+		{name: "pi anthropic js sdk case insensitive", userAgent: "  anthropic/js 0.91.1  ", want: UsageClientSourcePi},
 		{name: "empty", userAgent: "", want: UsageClientSourceUnknown},
 		{name: "unrecognized", userAgent: "curl/8.0", want: UsageClientSourceUnknown},
+		{name: "anthropic js token in middle is not pi", userAgent: "Mozilla/5.0 Anthropic/JS 0.91.1", want: UsageClientSourceUnknown},
 		{name: "codex token in middle is not an official client", userAgent: "Mozilla/5.0 codex_cli_rs/0.144.1", want: UsageClientSourceUnknown},
 	}
 

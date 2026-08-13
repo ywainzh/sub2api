@@ -12,6 +12,7 @@ type UsageClientSource string
 const (
 	UsageClientSourceCodex   UsageClientSource = "codex"
 	UsageClientSourceClaude  UsageClientSource = "claude"
+	UsageClientSourcePi      UsageClientSource = "pi"
 	UsageClientSourceUnknown UsageClientSource = "unknown"
 )
 
@@ -24,6 +25,11 @@ func DetectUsageClientSource(userAgent string) UsageClientSource {
 	}
 
 	normalized := strings.ToLower(ua)
+	// Pi's Anthropic API-key/custom-provider path inherits the official
+	// Anthropic JavaScript SDK User-Agent instead of sending a Pi-specific one.
+	if strings.HasPrefix(normalized, "anthropic/js ") {
+		return UsageClientSourcePi
+	}
 	if strings.HasPrefix(normalized, "claude-cli/") || strings.HasPrefix(normalized, "claude code/") {
 		return UsageClientSourceClaude
 	}

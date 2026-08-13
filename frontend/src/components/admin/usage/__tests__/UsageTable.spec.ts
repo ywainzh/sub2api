@@ -33,6 +33,7 @@ const messages: Record<string, string> = {
   'usage.accountBilled': 'Account billed',
   'usage.clientSourceCodex': 'Codex',
   'usage.clientSourceClaude': 'Claude',
+  'usage.clientSourcePi': 'Pi',
   'usage.clientSourceUnknown': 'Unknown',
   'usage.imageUnit': ' images',
   'usage.imageCount': 'Image count',
@@ -124,12 +125,13 @@ describe('admin UsageTable tooltip', () => {
     } as DOMRect)
   })
 
-  it('renders Codex, Claude, and unknown client source badges', () => {
+  it('renders Codex, Claude, Pi, and unknown client source badges', () => {
     const wrapper = mount(UsageTable, {
       props: {
         data: [
           { ...baseImageRow, request_id: 'req-source-codex', client_source: 'codex' },
           { ...baseImageRow, request_id: 'req-source-claude', client_source: 'claude' },
+          { ...baseImageRow, request_id: 'req-source-pi', client_source: 'pi' },
           { ...baseImageRow, request_id: 'req-source-unknown', client_source: 'unknown' },
         ],
         loading: false,
@@ -146,10 +148,11 @@ describe('admin UsageTable tooltip', () => {
     })
 
     const badges = wrapper.findAll('[data-testid="usage-client-source"]')
-    expect(badges.map((badge) => badge.text())).toEqual(['Codex', 'Claude', 'Unknown'])
+    expect(badges.map((badge) => badge.text())).toEqual(['Codex', 'Claude', 'Pi', 'Unknown'])
     expect(badges[0].classes()).toContain('bg-blue-100')
     expect(badges[1].classes()).toContain('bg-orange-100')
-    expect(badges[2].classes()).toContain('bg-gray-100')
+    expect(badges[2].classes()).toContain('bg-violet-100')
+    expect(badges[3].classes()).toContain('bg-gray-100')
   })
 
   it('marks only usage rows that actually applied long-context billing', () => {

@@ -1574,7 +1574,7 @@ export interface CodexSessionImportResult {
 
 export type RedeemCodeType = 'balance' | 'concurrency' | 'subscription' | 'invitation'
 export type UsageRequestType = 'unknown' | 'sync' | 'stream' | 'ws_v2' | 'cyber' | 'live'
-export type UsageClientSource = 'codex' | 'claude' | 'unknown'
+export type UsageClientSource = 'codex' | 'claude' | 'pi' | 'unknown'
 export type ImageSizeSource = 'output' | 'input' | 'default' | 'legacy'
 export type ImageSizeBreakdown = Record<string, number>
 
