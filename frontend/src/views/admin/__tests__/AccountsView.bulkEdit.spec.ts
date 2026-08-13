@@ -10,6 +10,7 @@ const {
   getUpstreamBillingProbeSettings,
   getAllProxies,
   getAllGroups,
+  probeUpstreamBilling,
   probeUpstreamBillingBatch,
   showError,
   showSuccess
@@ -20,6 +21,7 @@ const {
   getUpstreamBillingProbeSettings: vi.fn(),
   getAllProxies: vi.fn(),
   getAllGroups: vi.fn(),
+  probeUpstreamBilling: vi.fn(),
   probeUpstreamBillingBatch: vi.fn(),
   showError: vi.fn(),
   showSuccess: vi.fn()
@@ -35,6 +37,7 @@ vi.mock('@/api/admin', () => ({
       delete: vi.fn(),
       batchClearError: vi.fn(),
       batchRefresh: vi.fn(),
+      probeUpstreamBilling,
       probeUpstreamBillingBatch,
       toggleSchedulable: vi.fn()
     },
@@ -85,6 +88,18 @@ const DataTableStub = {
   `
 }
 
+const ProbeDataTableStub = {
+  props: ['data'],
+  template: `
+    <div>
+      <div v-for="row in data" :key="row.id">
+        <div data-test="account-rate"><slot name="cell-rate_multiplier" :row="row" /></div>
+        <slot name="cell-upstream_billing_rate" :row="row" />
+      </div>
+    </div>
+  `
+}
+
 const AccountBulkActionsBarStub = {
   props: ['selectedIds'],
   emits: ['edit-filtered', 'probe-upstream-billing'],
@@ -116,6 +131,7 @@ describe('admin AccountsView bulk edit scope', () => {
     getUpstreamBillingProbeSettings.mockReset()
     getAllProxies.mockReset()
     getAllGroups.mockReset()
+    probeUpstreamBilling.mockReset()
     probeUpstreamBillingBatch.mockReset()
     showError.mockReset()
     showSuccess.mockReset()
@@ -136,6 +152,7 @@ describe('admin AccountsView bulk edit scope', () => {
     getUpstreamBillingProbeSettings.mockResolvedValue({ enabled: true, interval_minutes: 30 })
     getAllProxies.mockResolvedValue([])
     getAllGroups.mockResolvedValue([])
+    probeUpstreamBilling.mockResolvedValue({})
     probeUpstreamBillingBatch.mockResolvedValue([])
   })
 
@@ -253,7 +270,7 @@ describe('admin AccountsView bulk edit scope', () => {
     })
   })
 
-  it('does not load or render the removed upstream billing column', async () => {
+  it('passes the loaded global probe state to every upstream billing cell', async () => {
     listAccounts.mockResolvedValue({
       items: [
         {
@@ -318,8 +335,8 @@ describe('admin AccountsView bulk edit scope', () => {
 
     await flushPromises()
 
-    expect(getUpstreamBillingProbeSettings).not.toHaveBeenCalled()
-    expect(wrapper.find('[data-test="upstream-billing-cell"]').exists()).toBe(false)
+    expect(getUpstreamBillingProbeSettings).toHaveBeenCalledTimes(1)
+    expect(wrapper.get('[data-test="upstream-billing-cell"]').attributes('data-global-enabled')).toBe('false')
   })
 
   it('submits selected account IDs from every page for backend eligibility checks', async () => {
@@ -532,16 +549,38 @@ describe('admin AccountsView bulk edit scope', () => {
     consoleError.mockRestore()
   })
 
-  it('clears the removed upstream billing sort preference', async () => {
-    localStorage.setItem('account-table-sort', JSON.stringify({ key: 'upstream_billing_rate', order: 'asc' }))
-    listAccounts.mockResolvedValue({ items: [], total: 0, page: 1, page_size: 20, pages: 0 })
+  it('refreshes the account row after a successful single-account probe', async () => {
+    const account = (rateMultiplier: number) => ({
+      id: 7,
+      name: 'account-7',
+      platform: 'openai',
+      type: 'apikey',
+      status: 'active',
+      schedulable: true,
+      rate_multiplier: rateMultiplier,
+      extra: { upstream_billing_probe_enabled: true },
+      created_at: '2026-07-13T00:00:00Z',
+      updated_at: '2026-07-13T00:00:00Z'
+    })
+    listAccounts
+      .mockResolvedValueOnce({ items: [account(0.25)], total: 1, page: 1, page_size: 20, pages: 1 })
+      .mockResolvedValueOnce({ items: [account(0.065)], total: 1, page: 1, page_size: 20, pages: 1 })
+    probeUpstreamBilling.mockResolvedValue({
+      account_id: 7,
+      snapshot: {
+        status: 'ok',
+        data: { effective_rate_multiplier: 0.065 },
+        last_attempt_at: '2026-07-13T00:00:00Z',
+        next_probe_at: '2026-07-13T00:30:00Z'
+      }
+    })
 
-    mount(AccountsView, {
+    const wrapper = mount(AccountsView, {
       global: {
         stubs: {
           AppLayout: { template: '<div><slot /></div>' },
           TablePageLayout: { template: '<div><slot name="table" /></div>' },
-          DataTable: DataTableStub,
+          DataTable: ProbeDataTableStub,
           AccountBulkActionsBar: true,
           AccountTableActions: true,
           AccountTableFilters: true,
@@ -572,6 +611,11 @@ describe('admin AccountsView bulk edit scope', () => {
     })
 
     await flushPromises()
-    expect(localStorage.getItem('account-table-sort')).toBeNull()
+    await wrapper.get('[data-testid="upstream-billing-probe"]').trigger('click')
+    await flushPromises()
+
+    expect(probeUpstreamBilling).toHaveBeenCalledWith(7)
+    expect(listAccounts).toHaveBeenCalledTimes(2)
+    expect(wrapper.get('[data-test="account-rate"]').text()).toBe('0.065x')
   })
 })

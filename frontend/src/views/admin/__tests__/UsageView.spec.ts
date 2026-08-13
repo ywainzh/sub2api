@@ -4,22 +4,7 @@ import { defineComponent, ref } from 'vue'
 
 import UsageView from '../UsageView.vue'
 
-const {
-  list,
-  exportList,
-  getStats,
-  getSnapshotV2,
-  getById,
-  getModelStats,
-  listErrorLogs,
-  routeQuery,
-  saveAsMock,
-  aoaToSheet,
-  sheetAddAoa,
-  bookNew,
-  bookAppendSheet,
-  xlsxWrite,
-} = vi.hoisted(() => {
+const { list, exportList, getStats, getSnapshotV2, getById, getModelStats, listErrorLogs, routeQuery, aoaToSheet, sheetAddAoa, saveAs, xlsxWrite } = vi.hoisted(() => {
   vi.stubGlobal('localStorage', {
     getItem: vi.fn(() => null),
     setItem: vi.fn(),
@@ -28,19 +13,17 @@ const {
 
   return {
     list: vi.fn(),
-    exportList: vi.fn(),
+		exportList: vi.fn(),
     getStats: vi.fn(),
     getSnapshotV2: vi.fn(),
     getById: vi.fn(),
     getModelStats: vi.fn(),
     listErrorLogs: vi.fn(),
     routeQuery: {} as Record<string, string>,
-    saveAsMock: vi.fn(),
-    aoaToSheet: vi.fn(() => ({})),
-    sheetAddAoa: vi.fn(),
-    bookNew: vi.fn(() => ({})),
-    bookAppendSheet: vi.fn(),
-    xlsxWrite: vi.fn(() => new Uint8Array([1, 2, 3])),
+		aoaToSheet: vi.fn(() => ({})),
+		sheetAddAoa: vi.fn(),
+		saveAs: vi.fn(),
+		xlsxWrite: vi.fn(() => new Uint8Array([1, 2, 3])),
   }
 })
 
@@ -48,13 +31,21 @@ const messages: Record<string, string> = {
   'admin.dashboard.timeRange': 'Time Range',
   'admin.dashboard.day': 'Day',
   'admin.dashboard.hour': 'Hour',
-  'admin.usage.account': 'Account',
   'admin.usage.failedToLoadUser': 'Failed to load user',
-  'usage.clientSource': 'Source',
-  'usage.clientSourceCodex': 'Codex',
-  'usage.clientSourceClaude': 'Claude',
-  'usage.clientSourceUnknown': 'Unknown',
-  'usage.model': 'Model',
+	'admin.usage.requestId': 'Request ID',
+	'usage.requestedModel': 'Requested model',
+	'usage.sentUpstreamModel': 'Sent upstream model',
+	'usage.upstreamResponseModel': 'Upstream response model',
+	'usage.upstreamModelMismatch': 'Upstream model mismatch',
+	'common.yes': 'Yes',
+	'common.no': 'No',
+}
+
+const formatLocalDate = (date: Date): string => {
+  const year = date.getFullYear()
+  const month = String(date.getMonth() + 1).padStart(2, '0')
+  const day = String(date.getDate()).padStart(2, '0')
+  return `${year}-${month}-${day}`
 }
 
 vi.mock('@/api/admin', () => ({
@@ -75,22 +66,20 @@ vi.mock('@/api/admin', () => ({
 
 vi.mock('@/api/admin/usage', () => ({
   adminUsageAPI: {
-    list: exportList,
+		list: exportList,
   },
 }))
 
-vi.mock('file-saver', () => ({
-  saveAs: saveAsMock,
-}))
+vi.mock('file-saver', () => ({ saveAs }))
 
 vi.mock('xlsx', () => ({
-  utils: {
-    aoa_to_sheet: aoaToSheet,
-    sheet_add_aoa: sheetAddAoa,
-    book_new: bookNew,
-    book_append_sheet: bookAppendSheet,
-  },
-  write: xlsxWrite,
+	utils: {
+		aoa_to_sheet: aoaToSheet,
+		sheet_add_aoa: sheetAddAoa,
+		book_new: vi.fn(() => ({})),
+		book_append_sheet: vi.fn(),
+	},
+	write: xlsxWrite,
 }))
 
 vi.mock('@/api/admin/ops', () => ({
@@ -146,22 +135,33 @@ const UsageFiltersStub = defineComponent({
 })
 const UsageTableStub = {
   props: ['columns'],
-  template: '<div data-test="usage-table"><span v-for="column in columns" :key="column.key" data-test="usage-column">{{ column.key }}</span></div>',
-}
-const OpsErrorLogTableStub = {
   emits: ['userClick'],
-  template: '<div data-test="error-table"><button class="user-click" @click="$emit(\'userClick\', 2)">user</button></div>',
+  template: '<div data-test="usage-table"><button class="user-click" @click="$emit(\'userClick\', 2)">user</button></div>',
 }
-const UsageFiltersExportStub = {
-  emits: ['export'],
-  template: '<div><button data-test="export-usage" @click="$emit(\'export\')">export</button><slot name="after-reset" /></div>',
+const UserTokenRankingStub = {
+  emits: ['select-user'],
+  template: '<div data-test="ranking"><button class="pick-user" @click="$emit(\'select-user\', 5, \'rank@test.com\')">pick</button></div>',
 }
-
-beforeEach(() => {
-  vi.mocked(localStorage.getItem).mockReset()
-  vi.mocked(localStorage.getItem).mockReturnValue(null)
-  vi.mocked(localStorage.setItem).mockReset()
-})
+const ModelDistributionChartStub = {
+  props: ['metric'],
+  emits: ['update:metric'],
+  template: `
+    <div data-test="model-chart">
+      <span class="metric">{{ metric }}</span>
+      <button class="switch-metric" @click="$emit('update:metric', 'actual_cost')">switch</button>
+    </div>
+  `,
+}
+const GroupDistributionChartStub = {
+  props: ['metric'],
+  emits: ['update:metric'],
+  template: `
+    <div data-test="group-chart">
+      <span class="metric">{{ metric }}</span>
+      <button class="switch-metric" @click="$emit('update:metric', 'actual_cost')">switch</button>
+    </div>
+  `,
+}
 
 const mountRouteFilteredUsageView = () => mount(UsageView, {
   global: { stubs: {
@@ -271,7 +271,7 @@ describe('admin UsageView route filters', () => {
   })
 })
 
-describe('admin UsageView overview', () => {
+describe('admin UsageView distribution metric toggles', () => {
   beforeEach(() => {
     vi.useFakeTimers()
     list.mockReset()
@@ -307,7 +307,7 @@ describe('admin UsageView overview', () => {
     vi.useRealTimers()
   })
 
-  it('keeps previous model filter options during refresh until new data arrives', async () => {
+  it('keeps previous model stats visible during refresh until new data arrives', async () => {
     // 首次加载返回 A
     getModelStats.mockResolvedValueOnce({ models: [{ model: 'A', total_tokens: 10 }] })
 
@@ -317,7 +317,7 @@ describe('admin UsageView overview', () => {
         UsageTable: true, UsageExportProgress: true, UsageCleanupDialog: true,
         UserBalanceHistoryModal: true, AuditLogModal: true, Pagination: true, Select: true,
         DateRangePicker: true, Icon: true, TokenUsageTrend: true,
-        ModelDistributionChart: true, GroupDistributionChart: true,
+        ModelDistributionChart: ModelDistributionChartStub, GroupDistributionChart: GroupDistributionChartStub,
         EndpointDistributionChart: true, UserTokenRanking: true,
       } },
     })
@@ -338,7 +338,7 @@ describe('admin UsageView overview', () => {
     expect((wrapper.vm as any).requestedModelStats).toEqual([{ model: 'B', total_tokens: 20 }])
   })
 
-  it('does not render distribution charts or request their snapshot data', async () => {
+  it('keeps model and group metric toggles independent without refetching chart data', async () => {
     const wrapper = mount(UsageView, {
       global: {
         stubs: {
@@ -354,8 +354,8 @@ describe('admin UsageView overview', () => {
           DateRangePicker: true,
           Icon: true,
           TokenUsageTrend: true,
-          ModelDistributionChart: true,
-          GroupDistributionChart: true,
+          ModelDistributionChart: ModelDistributionChartStub,
+          GroupDistributionChart: GroupDistributionChartStub,
           UserTokenRanking: true,
         },
       },
@@ -364,16 +364,56 @@ describe('admin UsageView overview', () => {
     vi.advanceTimersByTime(120)
     await flushPromises()
 
-    expect(wrapper.find('model-distribution-chart-stub').exists()).toBe(false)
-    expect(wrapper.find('group-distribution-chart-stub').exists()).toBe(false)
-    expect(getSnapshotV2).not.toHaveBeenCalled()
+    expect(getSnapshotV2).toHaveBeenCalledTimes(1)
+    const now = new Date()
+    const yesterday = new Date(now.getTime() - 24 * 60 * 60 * 1000)
+    expect(getSnapshotV2).toHaveBeenCalledWith(expect.objectContaining({
+      start_date: formatLocalDate(yesterday),
+      end_date: formatLocalDate(now),
+      granularity: 'hour'
+    }))
+
+    const modelChart = wrapper.find('[data-test="model-chart"]')
+    const groupChart = wrapper.find('[data-test="group-chart"]')
+
+    expect(modelChart.find('.metric').text()).toBe('tokens')
+    expect(groupChart.find('.metric').text()).toBe('tokens')
+
+    await modelChart.find('.switch-metric').trigger('click')
+    await flushPromises()
+
+    expect(modelChart.find('.metric').text()).toBe('actual_cost')
+    expect(groupChart.find('.metric').text()).toBe('tokens')
+    expect(getSnapshotV2).toHaveBeenCalledTimes(1)
+
+    await groupChart.find('.switch-metric').trigger('click')
+    await flushPromises()
+
+    expect(modelChart.find('.metric').text()).toBe('actual_cost')
+    expect(groupChart.find('.metric').text()).toBe('actual_cost')
+    expect(getSnapshotV2).toHaveBeenCalledTimes(1)
+  })
+})
+
+describe('admin UsageView request ID column visibility', () => {
+  beforeEach(() => {
+    vi.useFakeTimers()
+    vi.mocked(localStorage.getItem).mockReset().mockReturnValue(null)
+    vi.mocked(localStorage.setItem).mockReset()
+    list.mockReset().mockResolvedValue({ items: [], total: 0, pages: 0 })
+    getStats.mockReset().mockResolvedValue({
+      total_requests: 0, total_input_tokens: 0, total_output_tokens: 0,
+      total_cache_tokens: 0, total_tokens: 0, total_cost: 0, total_actual_cost: 0, average_duration_ms: 0,
+    })
+    getSnapshotV2.mockReset().mockResolvedValue({ trend: [], models: [], groups: [] })
+    getModelStats.mockReset().mockResolvedValue({ models: [] })
   })
 
-  it('does not render the usage user column or the user ranking tab', async () => {
-    vi.mocked(localStorage.getItem).mockImplementation((key) => (
-      key === 'usage-hidden-columns' ? JSON.stringify(['client_source']) : null
-    ))
+  afterEach(() => {
+    vi.useRealTimers()
+  })
 
+  it('keeps request ID hidden by default and allows enabling it from column settings', async () => {
     const wrapper = mount(UsageView, {
       global: {
         stubs: {
@@ -384,117 +424,38 @@ describe('admin UsageView overview', () => {
           UsageExportProgress: true,
           UsageCleanupDialog: true,
           UserBalanceHistoryModal: true,
+          AuditLogModal: true,
           Pagination: true,
+          Select: true,
           DateRangePicker: true,
           Icon: true,
+          TokenUsageTrend: true,
+          ModelDistributionChart: true,
+          GroupDistributionChart: true,
+          EndpointDistributionChart: true,
           UserTokenRanking: true,
-          OpsErrorLogTable: true,
-          OpsErrorDetailModal: true,
         },
       },
     })
+    await wrapper.vm.$nextTick()
 
-    await flushPromises()
+    const usageTable = wrapper.findComponent(UsageTableStub)
+    expect(usageTable.props('columns')).not.toEqual(
+      expect.arrayContaining([expect.objectContaining({ key: 'request_id' })]),
+    )
 
-    const usageColumnKeys = wrapper.findAll('[data-test="usage-column"]').map((column) => column.text())
-    expect(usageColumnKeys).not.toContain('user')
-    expect(usageColumnKeys).toContain('api_key')
-    expect(usageColumnKeys.slice(0, 4)).toEqual(['api_key', 'account', 'client_source', 'model'])
-    expect(wrapper.findAll('[data-testid="usage-detail-tab"]')).toHaveLength(2)
-    expect(wrapper.find('user-token-ranking-stub').exists()).toBe(false)
-  })
-})
+    await wrapper.get('button[title="admin.users.columnSettings"]').trigger('click')
+    const requestIdToggle = wrapper.findAll('button').find((button) => button.text() === 'Request ID')
+    expect(requestIdToggle).toBeDefined()
+    await requestIdToggle!.trigger('click')
 
-describe('admin UsageView export', () => {
-  beforeEach(() => {
-    list.mockReset().mockResolvedValue({ items: [], total: 0, pages: 0 })
-    exportList.mockReset().mockResolvedValue({
-      items: [{
-        created_at: '2026-08-06T12:00:00Z',
-        user: { email: 'user@example.com' },
-        api_key: { name: 'Primary key' },
-        account: { name: 'OpenAI Account' },
-        client_source: 'claude',
-        model: 'gpt-5.4',
-        upstream_model: null,
-        reasoning_effort: null,
-        group: { name: 'Default' },
-        inbound_endpoint: '/v1/responses',
-        upstream_endpoint: '/backend-api/codex/responses',
-        request_type: 'sync',
-        stream: false,
-        input_tokens: 10,
-        output_tokens: 20,
-        cache_read_tokens: 0,
-        cache_creation_tokens: 0,
-        input_cost: 0.01,
-        output_cost: 0.02,
-        cache_read_cost: 0,
-        cache_creation_cost: 0,
-        rate_multiplier: 1,
-        account_rate_multiplier: 1,
-        total_cost: 0.03,
-        actual_cost: 0.03,
-        first_token_ms: 100,
-        duration_ms: 500,
-        request_id: 'req-export-source',
-        user_agent: 'Claude Code/0.5.0',
-        ip_address: '203.0.113.10',
-      }],
-      total: 1,
-      page: 1,
-      page_size: 100,
-      pages: 1,
-    })
-    getStats.mockReset().mockResolvedValue({
-      total_requests: 0,
-      total_input_tokens: 0,
-      total_output_tokens: 0,
-      total_cache_tokens: 0,
-      total_tokens: 0,
-      total_cost: 0,
-      total_actual_cost: 0,
-      average_duration_ms: 0,
-    })
-    getModelStats.mockReset().mockResolvedValue({ models: [] })
-    listErrorLogs.mockReset().mockResolvedValue({ items: [], total: 0, pages: 0 })
-    aoaToSheet.mockClear()
-    sheetAddAoa.mockClear()
-    bookNew.mockClear()
-    bookAppendSheet.mockClear()
-    xlsxWrite.mockClear()
-    saveAsMock.mockClear()
-  })
-
-  it('exports Source between Account and Model using the display label', async () => {
-    const wrapper = mount(UsageView, {
-      global: {
-        stubs: {
-          AppLayout: AppLayoutStub,
-          UsageStatsCards: true,
-          UsageFilters: UsageFiltersExportStub,
-          UsageTable: true,
-          UsageExportProgress: true,
-          UsageCleanupDialog: true,
-          UserBalanceHistoryModal: true,
-          Pagination: true,
-          DateRangePicker: true,
-          Icon: true,
-          OpsErrorLogTable: true,
-          OpsErrorDetailModal: true,
-        },
-      },
-    })
-
-    await flushPromises()
-    await wrapper.get('[data-test="export-usage"]').trigger('click')
-    await flushPromises()
-
-    const headers = aoaToSheet.mock.calls[0][0][0]
-    const exportedRow = sheetAddAoa.mock.calls[0][1][0]
-    expect(headers.slice(3, 6)).toEqual(['Account', 'Source', 'Model'])
-    expect(exportedRow.slice(3, 6)).toEqual(['OpenAI Account', 'Claude', 'gpt-5.4'])
-    expect(saveAsMock).toHaveBeenCalledTimes(1)
+    expect(usageTable.props('columns')).toEqual(
+      expect.arrayContaining([expect.objectContaining({ key: 'request_id', label: 'Request ID' })]),
+    )
+    expect(localStorage.setItem).toHaveBeenCalledWith(
+      'usage-hidden-columns-version',
+      'request-id-hidden-by-default',
+    )
   })
 })
 
@@ -518,7 +479,7 @@ describe('admin UsageView handleUserClick', () => {
     vi.useRealTimers()
   })
 
-  it('opens user via include_deleted when clicking an error row user', async () => {
+  it('opens user via include_deleted when clicking a usage row user', async () => {
     getById.mockResolvedValue({ id: 2, email: 'd@test.com', deleted_at: '2026-05-28T00:00:00Z' })
 
     const wrapper = mount(UsageView, {
@@ -527,7 +488,7 @@ describe('admin UsageView handleUserClick', () => {
           AppLayout: AppLayoutStub,
           UsageStatsCards: true,
           UsageFilters: UsageFiltersStub,
-          UsageTable: true,
+          UsageTable: UsageTableStub,
           UsageExportProgress: true,
           UsageCleanupDialog: true,
           UserBalanceHistoryModal: true,
@@ -541,8 +502,6 @@ describe('admin UsageView handleUserClick', () => {
           GroupDistributionChart: true,
           EndpointDistributionChart: true,
           UserTokenRanking: true,
-          OpsErrorLogTable: OpsErrorLogTableStub,
-          OpsErrorDetailModal: true,
         },
       },
     })
@@ -550,7 +509,7 @@ describe('admin UsageView handleUserClick', () => {
     vi.advanceTimersByTime(120)
     await flushPromises()
 
-    await wrapper.find('[data-test="error-table"] .user-click').trigger('click')
+    await wrapper.find('[data-test="usage-table"] .user-click').trigger('click')
     await flushPromises()
 
     expect(getById).toHaveBeenCalledWith(2, true)
@@ -613,4 +572,118 @@ describe('admin UsageView errors tab filter forwarding', () => {
       group_id: 3,
     }))
   })
+})
+
+describe('admin UsageView ranking tab', () => {
+  beforeEach(() => {
+    vi.useFakeTimers()
+    list.mockReset()
+    getStats.mockReset()
+    getSnapshotV2.mockReset()
+    getModelStats.mockReset()
+
+    list.mockResolvedValue({ items: [], total: 0, pages: 0 })
+    getStats.mockResolvedValue({
+      total_requests: 0, total_input_tokens: 0, total_output_tokens: 0,
+      total_cache_tokens: 0, total_tokens: 0, total_cost: 0, total_actual_cost: 0, average_duration_ms: 0,
+    })
+    getSnapshotV2.mockResolvedValue({ trend: [], models: [], groups: [] })
+    getModelStats.mockResolvedValue({ models: [] })
+  })
+
+  afterEach(() => {
+    vi.useRealTimers()
+  })
+
+  it('mounts ranking lazily and drill-down sets user filter then jumps back to usage tab', async () => {
+    const wrapper = mount(UsageView, {
+      global: { stubs: {
+        AppLayout: AppLayoutStub, UsageStatsCards: true, UsageFilters: UsageFiltersStub,
+        UsageTable: true, UsageExportProgress: true, UsageCleanupDialog: true,
+        UserBalanceHistoryModal: true, Pagination: true, Select: true,
+        DateRangePicker: true, Icon: true, TokenUsageTrend: true,
+        ModelDistributionChart: true, GroupDistributionChart: true, EndpointDistributionChart: true,
+        UserTokenRanking: UserTokenRankingStub, OpsErrorLogTable: true, OpsErrorDetailModal: true,
+      } },
+    })
+    vi.advanceTimersByTime(120)
+    await flushPromises()
+
+    // 懒挂载:切到排行 tab 前不渲染
+    expect(wrapper.find('[data-test="ranking"]').exists()).toBe(false)
+
+    const tabs = wrapper.findAll('[data-testid="usage-detail-tab"]')
+    expect(tabs).toHaveLength(3)
+    await tabs[2].trigger('click')
+    await flushPromises()
+    expect(wrapper.find('[data-test="ranking"]').exists()).toBe(true)
+
+    // 下钻:设置 user_id、切回用量明细 tab 并按新筛选重新拉取列表
+    list.mockClear()
+    await wrapper.find('[data-test="ranking"] .pick-user').trigger('click')
+    await flushPromises()
+
+    expect((wrapper.vm as any).activeTab).toBe('usage')
+    expect((wrapper.vm as any).filters.user_id).toBe(5)
+    expect(list).toHaveBeenCalledWith(expect.objectContaining({ user_id: 5 }), expect.anything())
+  })
+})
+
+describe('admin UsageView model audit export', () => {
+	beforeEach(() => {
+		vi.useFakeTimers()
+		list.mockReset().mockResolvedValue({ items: [], total: 0, pages: 0 })
+		exportList.mockReset().mockResolvedValue({
+			items: [{
+				id: 1,
+				created_at: '2026-08-04T00:00:00Z',
+				model: 'gpt-5.6-sol',
+				upstream_model: 'gpt-5.5',
+				upstream_response_model: 'gpt-5.4',
+				upstream_model_mismatch: true,
+				request_type: 'sync',
+				input_tokens: 1,
+				output_tokens: 1,
+				cache_read_tokens: 0,
+				cache_creation_tokens: 0,
+				duration_ms: 10,
+			}],
+			total: 1,
+			pages: 1,
+		})
+		getStats.mockReset().mockResolvedValue({
+			total_requests: 0, total_input_tokens: 0, total_output_tokens: 0,
+			total_cache_tokens: 0, total_tokens: 0, total_cost: 0, total_actual_cost: 0, average_duration_ms: 0,
+		})
+		getSnapshotV2.mockReset().mockResolvedValue({ trend: [], models: [], groups: [] })
+		getModelStats.mockReset().mockResolvedValue({ models: [] })
+		aoaToSheet.mockClear()
+		sheetAddAoa.mockClear()
+		saveAs.mockClear()
+		xlsxWrite.mockClear()
+	})
+
+	afterEach(() => {
+		vi.useRealTimers()
+	})
+
+	it('exports requested, sent, response, and mismatch as separate admin columns', async () => {
+		const wrapper = mountRouteFilteredUsageView()
+		vi.advanceTimersByTime(120)
+		await flushPromises()
+
+		await (wrapper.vm as any).exportToExcel()
+		await flushPromises()
+
+		const headers = aoaToSheet.mock.calls[0][0][0]
+		expect(headers.slice(4, 8)).toEqual([
+			'Requested model',
+			'Sent upstream model',
+			'Upstream response model',
+			'Upstream model mismatch',
+		])
+		const row = sheetAddAoa.mock.calls[0][1][0]
+		expect(row.slice(4, 8)).toEqual(['gpt-5.6-sol', 'gpt-5.5', 'gpt-5.4', 'Yes'])
+		expect(saveAs).toHaveBeenCalledTimes(1)
+	})
 })

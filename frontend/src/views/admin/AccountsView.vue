@@ -318,7 +318,12 @@
               :today-stats="todayStatsByAccountId[String(row.id)] ?? null"
               :today-stats-loading="todayStatsLoading"
               :manual-refresh-token="usageManualRefreshToken"
+              :batched-usage="usageBatchByAccountId[String(row.id)] ?? null"
+              :batched-usage-error="usageBatchErrorByAccountId[String(row.id)] ?? null"
+              :batched-usage-loading="usageBatchLoadingByAccountId[String(row.id)] === true"
+              :request-batched-usage="isDesktopViewport ? queueBatchedUsage : null"
               @account-updated="handleAccountUpdated"
+              @usage-loaded="handleAccountUsageLoaded(row.id, $event)"
             />
           </template>
           <template #cell-proxy="{ row }">
@@ -355,6 +360,23 @@
                 <Icon name="sync" size="xs" />
               </span>
             </span>
+          </template>
+          <template #header-upstream_billing_rate="{ column }">
+            <div class="flex items-center gap-1">
+              <span>{{ column.label }}</span>
+              <span @click.stop>
+                <HelpTooltip :content="t('admin.accounts.upstreamBilling.trustWarning')" width-class="w-80" />
+              </span>
+            </div>
+          </template>
+          <template #cell-upstream_billing_rate="{ row }">
+            <UpstreamBillingRateCell
+              :account="row"
+              :global-probe-enabled="upstreamBillingProbeGloballyEnabled"
+              :now="upstreamBillingNow"
+              :probing="probingUpstreamBilling.has(row.id)"
+              @probe="handleProbeUpstreamBilling(row)"
+            />
           </template>
           <template #cell-priority="{ value }">
             <span class="text-sm text-gray-700 dark:text-gray-300">{{ value }}</span>
@@ -497,19 +519,20 @@ import AccountUsageCell from '@/components/account/AccountUsageCell.vue'
 import AccountTodayStatsCell from '@/components/account/AccountTodayStatsCell.vue'
 import AccountGroupsCell from '@/components/account/AccountGroupsCell.vue'
 import AccountCapacityCell from '@/components/account/AccountCapacityCell.vue'
+import UpstreamBillingRateCell from '@/components/account/UpstreamBillingRateCell.vue'
 import PlatformTypeBadge from '@/components/common/PlatformTypeBadge.vue'
 import Icon from '@/components/icons/Icon.vue'
 import ErrorPassthroughRulesModal from '@/components/admin/ErrorPassthroughRulesModal.vue'
 import TLSFingerprintProfilesModal from '@/components/admin/TLSFingerprintProfilesModal.vue'
 import { fetchAllAccountIds } from '@/utils/accountSelection'
-import { buildOpenAIUsageRefreshKey } from '@/utils/accountUsageRefresh'
+import { buildGrokUsageRefreshKey, buildOpenAIUsageRefreshKey } from '@/utils/accountUsageRefresh'
 import { formatDateTime, formatRelativeTime } from '@/utils/format'
 import { proxyExpiryBadgeClass, proxyExpiryLabelKey } from '@/utils/proxyExpiry'
 import { extractApiErrorMessage } from '@/utils/apiError'
 import { sanitizeUrl } from '@/utils/url'
 import { getFloatingPanelPosition } from '@/utils/floatingPanel'
 import { formatMultiplier } from '@/utils/formatters'
-import type { Account, AccountPlatform, AccountSchedulerGroupScore, AccountType, Proxy as AccountProxy, AdminGroup, WindowStats, ClaudeModel, UpstreamBillingProbeSnapshot } from '@/types'
+import type { Account, AccountPlatform, AccountSchedulerGroupScore, AccountType, AccountUsageInfo, Proxy as AccountProxy, AdminGroup, WindowStats, ClaudeModel, UpstreamBillingProbeSnapshot } from '@/types'
 
 const { t } = useI18n()
 const appStore = useAppStore()
@@ -588,6 +611,10 @@ const togglingSchedulable = ref<number | null>(null)
 const menu = reactive<{show:boolean, acc:Account|null, pos:{top:number, left:number}|null}>({ show: false, acc: null, pos: null })
 const exportingData = ref(false)
 const probingUpstreamBilling = reactive(new Set<number>())
+const upstreamBillingProbeGloballyEnabled = ref<boolean | undefined>(undefined)
+const upstreamBillingNow = ref(Date.now())
+let lastUpstreamBillingSortRefreshMinute = -1
+useIntervalFn(() => { upstreamBillingNow.value = Date.now() }, 60_000)
 
 // Account tools dropdown
 const showAccountToolsDropdown = ref(false)
@@ -627,6 +654,7 @@ const ACCOUNT_SORTABLE_KEYS = new Set([
   'schedulable',
   'priority',
   'rate_multiplier',
+  'upstream_billing_rate',
   'last_used_at',
   'created_at',
   'expires_at'
@@ -638,10 +666,7 @@ const loadInitialAccountSortState = (): AccountSortState => {
     if (!raw) return fallback
     const parsed = JSON.parse(raw) as { key?: string; order?: string }
     const key = typeof parsed.key === 'string' ? parsed.key : ''
-    if (!ACCOUNT_SORTABLE_KEYS.has(key)) {
-      localStorage.removeItem(ACCOUNT_SORT_STORAGE_KEY)
-      return fallback
-    }
+    if (!ACCOUNT_SORTABLE_KEYS.has(key)) return fallback
     return {
       sort_by: key,
       sort_order: parsed.order === 'desc' ? 'desc' : 'asc'
@@ -672,6 +697,24 @@ const todayStatsReqSeq = ref(0)
 const pendingTodayStatsRefresh = ref(false)
 const usageManualRefreshToken = ref(0)
 
+const desktopViewportQuery = '(min-width: 768px)'
+const isDesktopViewport = ref(
+  typeof window === 'undefined' ? true : window.matchMedia(desktopViewportQuery).matches
+)
+let desktopViewportMediaQuery: MediaQueryList | null = null
+let desktopViewportListener: ((event: MediaQueryListEvent) => void) | null = null
+
+const usageBatchByAccountId = ref<Record<string, AccountUsageInfo | null>>({})
+const usageBatchErrorByAccountId = ref<Record<string, string | null>>({})
+const usageBatchLoadingByAccountId = ref<Record<string, boolean>>({})
+const usageBatchRequestTokenByAccountId = ref<Record<string, number>>({})
+const usageBatchCache = new Map<number, { data: AccountUsageInfo; ts: number }>()
+const USAGE_BATCH_CACHE_TTL = 5 * 60 * 1000
+const pendingUsageBatchIds = new Set<number>()
+let usageBatchFlushTimer: ReturnType<typeof setTimeout> | null = null
+let queuedUsageBatchForce = false
+let usageBatchRequestToken = 0
+
 const buildDefaultTodayStats = (): WindowStats => ({
   requests: 0,
   tokens: 0,
@@ -679,6 +722,138 @@ const buildDefaultTodayStats = (): WindowStats => ({
   standard_cost: 0,
   user_cost: 0
 })
+
+const accountSupportsBatchUsage = (account: Account) => {
+  if (account.platform === 'anthropic') {
+    return account.type === 'oauth' || account.type === 'setup-token'
+  }
+  if (account.platform === 'gemini') return true
+  if (account.platform === 'antigravity') return account.type === 'oauth'
+  if (account.platform === 'openai') return account.type === 'oauth'
+  if (account.platform === 'grok') return account.type === 'oauth'
+  return false
+}
+
+const setUsageBatchLoading = (accountID: number, loadingState: boolean) => {
+  usageBatchLoadingByAccountId.value = {
+    ...usageBatchLoadingByAccountId.value,
+    [String(accountID)]: loadingState
+  }
+}
+
+const setUsageBatchState = (accountID: number, usage: AccountUsageInfo | null, error: string | null) => {
+  const key = String(accountID)
+  usageBatchByAccountId.value = {
+    ...usageBatchByAccountId.value,
+    [key]: usage
+  }
+  usageBatchErrorByAccountId.value = {
+    ...usageBatchErrorByAccountId.value,
+    [key]: error
+  }
+}
+
+const handleAccountUsageLoaded = (accountID: number, usage: AccountUsageInfo) => {
+  if (usageBatchByAccountId.value[String(accountID)] === usage) return
+  setUsageBatchState(accountID, usage, null)
+}
+
+const flushQueuedUsageBatch = async () => {
+  usageBatchFlushTimer = null
+  const accountIDs = Array.from(pendingUsageBatchIds)
+  const force = queuedUsageBatchForce
+  pendingUsageBatchIds.clear()
+  queuedUsageBatchForce = false
+
+  if (accountIDs.length === 0) return
+
+  const requestTokensByAccount = accountIDs.reduce<Record<string, number>>((acc, accountID) => {
+    acc[String(accountID)] = usageBatchRequestTokenByAccountId.value[String(accountID)] ?? 0
+    return acc
+  }, {})
+
+  try {
+    const result = await adminAPI.accounts.getBatchUsage(accountIDs, force)
+
+    const usageMap = result.usage ?? {}
+    const errorMap = result.errors ?? {}
+    const now = Date.now()
+    const nextUsage = { ...usageBatchByAccountId.value }
+    const nextErrors = { ...usageBatchErrorByAccountId.value }
+    const nextLoading = { ...usageBatchLoadingByAccountId.value }
+
+    for (const accountID of accountIDs) {
+      const key = String(accountID)
+      if ((usageBatchRequestTokenByAccountId.value[key] ?? 0) !== requestTokensByAccount[key]) {
+        continue
+      }
+      const usage = usageMap[key] ?? null
+      nextUsage[key] = usage
+      nextErrors[key] = errorMap[key] ?? null
+      nextLoading[key] = false
+      if (usage) {
+        usageBatchCache.set(accountID, { data: usage, ts: now })
+      } else {
+        usageBatchCache.delete(accountID)
+      }
+    }
+
+    usageBatchByAccountId.value = nextUsage
+    usageBatchErrorByAccountId.value = nextErrors
+    usageBatchLoadingByAccountId.value = nextLoading
+  } catch (error) {
+    const nextErrors = { ...usageBatchErrorByAccountId.value }
+    const nextLoading = { ...usageBatchLoadingByAccountId.value }
+    for (const accountID of accountIDs) {
+      const key = String(accountID)
+      if ((usageBatchRequestTokenByAccountId.value[key] ?? 0) !== requestTokensByAccount[key]) {
+        continue
+      }
+      nextErrors[key] = 'Failed'
+      nextLoading[key] = false
+    }
+    usageBatchErrorByAccountId.value = nextErrors
+    usageBatchLoadingByAccountId.value = nextLoading
+    console.error('Failed to load account usage batch:', error)
+  }
+}
+
+const queueBatchedUsage = (account: Account, options?: { force?: boolean }) => {
+  if (!isDesktopViewport.value) return
+  if (!accountSupportsBatchUsage(account)) return
+
+  const force = options?.force === true
+  const cacheKey = account.id
+  const key = String(cacheKey)
+
+  if (force) {
+    usageBatchCache.delete(cacheKey)
+  } else {
+    const cached = usageBatchCache.get(cacheKey)
+    if (cached && Date.now() - cached.ts < USAGE_BATCH_CACHE_TTL) {
+      setUsageBatchState(cacheKey, cached.data, null)
+      setUsageBatchLoading(cacheKey, false)
+      return
+    }
+  }
+
+  usageBatchErrorByAccountId.value = {
+    ...usageBatchErrorByAccountId.value,
+    [key]: null
+  }
+  usageBatchRequestTokenByAccountId.value = {
+    ...usageBatchRequestTokenByAccountId.value,
+    [key]: ++usageBatchRequestToken
+  }
+  setUsageBatchLoading(cacheKey, true)
+  pendingUsageBatchIds.add(cacheKey)
+  queuedUsageBatchForce = queuedUsageBatchForce || force
+
+  if (usageBatchFlushTimer !== null) return
+  usageBatchFlushTimer = setTimeout(() => {
+    void flushQueuedUsageBatch()
+  }, 0)
+}
 
 const refreshTodayStatsBatch = async () => {
   // Why this checks both columns:
@@ -966,8 +1141,15 @@ const resetAutoRefreshCache = () => {
 
 const isFirstLoad = ref(true)
 
+function markUpstreamBillingSortRefresh() {
+  if (sortState.sort_by === 'upstream_billing_rate') {
+    lastUpstreamBillingSortRefreshMinute = Math.floor(Date.now() / 60_000)
+  }
+}
+
 const load = async () => {
   const requestParams = params as any
+  markUpstreamBillingSortRefresh()
   syncAccountListDerivedParams()
   hasPendingListSync.value = false
   resetAutoRefreshCache()
@@ -984,12 +1166,26 @@ const load = async () => {
 }
 
 const reload = async () => {
+  markUpstreamBillingSortRefresh()
   syncAccountListDerivedParams()
   hasPendingListSync.value = false
   resetAutoRefreshCache()
   pendingTodayStatsRefresh.value = false
   await baseReload()
   await refreshTodayStatsBatch()
+}
+
+const refreshUpstreamBillingSortedList = async (force = false) => {
+  if (sortState.sort_by !== 'upstream_billing_rate') return
+
+  const minute = Math.floor(upstreamBillingNow.value / 60_000)
+  if (!force && lastUpstreamBillingSortRefreshMinute === minute) return
+  lastUpstreamBillingSortRefreshMinute = minute
+  try {
+    await reload()
+  } catch (error) {
+    console.error('Failed to refresh upstream billing sort:', error)
+  }
 }
 
 const debouncedReload = () => {
@@ -1032,12 +1228,37 @@ const handleSort = (key: string, order: AccountSortOrder) => {
 }
 
 watch(loading, (isLoading, wasLoading) => {
+  if (wasLoading && !isLoading) {
+    upstreamBillingNow.value = Date.now()
+  }
   if (wasLoading && !isLoading && pendingTodayStatsRefresh.value) {
     pendingTodayStatsRefresh.value = false
     refreshTodayStatsBatch().catch((error) => {
       console.error('Failed to refresh account today stats after table load:', error)
     })
   }
+})
+
+watch(accounts, (rows) => {
+  const visibleIDs = new Set(rows.map((row) => String(row.id)))
+  usageBatchByAccountId.value = Object.fromEntries(
+    Object.entries(usageBatchByAccountId.value).filter(([key]) => visibleIDs.has(key))
+  )
+  usageBatchErrorByAccountId.value = Object.fromEntries(
+    Object.entries(usageBatchErrorByAccountId.value).filter(([key]) => visibleIDs.has(key))
+  )
+  usageBatchLoadingByAccountId.value = Object.fromEntries(
+    Object.entries(usageBatchLoadingByAccountId.value).filter(([key]) => visibleIDs.has(key))
+  )
+  usageBatchRequestTokenByAccountId.value = Object.fromEntries(
+    Object.entries(usageBatchRequestTokenByAccountId.value).filter(([key]) => visibleIDs.has(key))
+  )
+})
+
+watch(upstreamBillingNow, () => {
+  if (sortState.sort_by !== 'upstream_billing_rate' || loading.value) return
+  if (typeof document !== 'undefined' && document.hidden) return
+  void refreshUpstreamBillingSortedList()
 })
 
 const isAnyModalOpen = computed(() => {
@@ -1079,7 +1300,8 @@ const shouldReplaceAutoRefreshRow = (current: Account, next: Account) => {
     current.rate_limit_reset_at !== next.rate_limit_reset_at ||
     current.overload_until !== next.overload_until ||
     current.temp_unschedulable_until !== next.temp_unschedulable_until ||
-    buildOpenAIUsageRefreshKey(current) !== buildOpenAIUsageRefreshKey(next)
+    buildOpenAIUsageRefreshKey(current) !== buildOpenAIUsageRefreshKey(next) ||
+    buildGrokUsageRefreshKey(current) !== buildGrokUsageRefreshKey(next)
   )
 }
 
@@ -1151,7 +1373,9 @@ const refreshAccountsIncrementally = async () => {
       pagination.pages = result.data.pages || 0
       mergeAccountsIncrementally(result.data.items || [])
       hasPendingListSync.value = false
+      markUpstreamBillingSortRefresh()
     }
+    upstreamBillingNow.value = Date.now()
 
     await refreshTodayStatsBatch()
   } catch (error) {
@@ -1162,9 +1386,18 @@ const refreshAccountsIncrementally = async () => {
 }
 
 const handleManualRefresh = async () => {
-  await load()
+  await Promise.all([load(), loadUpstreamBillingProbeGlobalState()])
   // Force usage cells to refetch /usage on explicit user refresh.
   usageManualRefreshToken.value += 1
+}
+
+const loadUpstreamBillingProbeGlobalState = async () => {
+  try {
+    const settings = await adminAPI.accounts.getUpstreamBillingProbeSettings()
+    upstreamBillingProbeGloballyEnabled.value = settings.enabled
+  } catch (error) {
+    console.error('Failed to load upstream billing probe settings:', error)
+  }
 }
 
 const closeAccountToolsDropdown = () => {
@@ -1249,25 +1482,109 @@ const { pause: pauseAutoRefresh, resume: resumeAutoRefresh } = useIntervalFn(
   { immediate: false }
 )
 
-// Fresh billing/quota snapshots are authoritative. Imported credential tiers
-// can be stale, so they remain fallbacks together with legacy plan_type fields.
+const GROK_QUOTA_SIGNAL_MAX_AGE_MS = 24 * 60 * 60 * 1000
+const GROK_QUOTA_SIGNAL_MAX_FUTURE_SKEW_MS = 5 * 60 * 1000
+
+function firstNonBlankString(...values: unknown[]): string | undefined {
+  return values.find((value): value is string => (
+    typeof value === 'string' && value.trim().length > 0
+  ))
+}
+
+function normalizeGrokPlanKey(value: unknown): string {
+  if (typeof value !== 'string') return ''
+  return value
+    .trim()
+    .toLowerCase()
+    .replace(/[\s_-]+/g, '')
+}
+
+function grokPersistedQuotaSnapshot(extra: Record<string, any>): Record<string, any> | undefined {
+  const usage = extra.grok_usage_snapshot
+  if (usage && typeof usage === 'object' && !Array.isArray(usage)) {
+    return usage as Record<string, any>
+  }
+  const legacy = extra.grok_quota_snapshot
+  if (legacy && typeof legacy === 'object' && !Array.isArray(legacy)) {
+    return legacy as Record<string, any>
+  }
+  return undefined
+}
+
+function isGrokQuotaTimestampFresh(raw: unknown): boolean {
+  const value = String(raw || '').trim()
+  if (!value) return false
+  const observedAt = Date.parse(value)
+  if (!Number.isFinite(observedAt)) return false
+  const age = Date.now() - observedAt
+  return age <= GROK_QUOTA_SIGNAL_MAX_AGE_MS && age >= -GROK_QUOTA_SIGNAL_MAX_FUTURE_SKEW_MS
+}
+
+function isGrok45ResponsesQuotaModel(model: unknown): boolean {
+  const value = String(model || '')
+    .trim()
+    .toLowerCase()
+    .replace(/^(x-ai|xai)\//, '')
+  return value === 'grok-4.5' || value.startsWith('grok-4.5-')
+}
+
+function grokQuotaLooksHeavy(snapshot: Record<string, any> | undefined): boolean {
+  const req = Number(snapshot?.requests?.limit ?? 0)
+  const tok = Number(snapshot?.tokens?.limit ?? 0)
+  return req >= 8300 || tok >= 53_000_000
+}
+
+function grok45ResponsesPlanIsHeavy(snapshot: Record<string, any> | undefined): boolean {
+  if (!snapshot) return false
+  const hint = normalizeGrokPlanKey(snapshot.plan_from_45_responses)
+  if (hint === 'supergrokheavy' && isGrokQuotaTimestampFresh(snapshot.plan_from_45_responses_at)) {
+    return true
+  }
+  const observedAt = snapshot.last_headers_seen_at || snapshot.updated_at
+  return (
+    isGrok45ResponsesQuotaModel(snapshot.model) &&
+    isGrokQuotaTimestampFresh(observedAt) &&
+    grokQuotaLooksHeavy(snapshot)
+  )
+}
+
+// JWT / unambiguous credentials outrank snapshots. SuperGrokPro is ambiguous
+// (covers SuperGrok and Heavy). 8300/53M only upgrades when the window came
+// from grok-4.5 Responses (or a carried 4.5 hint).
 function getAccountPlanType(row: any): string | undefined {
   if (!row) return undefined
   if (row.platform === 'grok') {
     const extra = (row.extra || {}) as Record<string, any>
     const billing = extra.grok_billing_snapshot as Record<string, any> | undefined
-    const quota = extra.grok_quota_snapshot as Record<string, any> | undefined
-    return (
-      billing?.plan ||
-      quota?.subscription_tier ||
-      row.credentials?.subscription_tier ||
-      extra.subscription_tier ||
-      row.credentials?.plan_type ||
-      row.parent_plan_type ||
-      undefined
+    const usage = extra.grok_usage_snapshot as Record<string, any> | undefined
+    const legacyQuota = extra.grok_quota_snapshot as Record<string, any> | undefined
+    const quota = grokPersistedQuotaSnapshot(extra)
+    const cred = firstNonBlankString(row.credentials?.subscription_tier)
+    const credKey = normalizeGrokPlanKey(cred)
+    if (credKey && credKey !== 'supergrokpro') {
+      return cred
+    }
+    if (
+      grok45ResponsesPlanIsHeavy(quota) &&
+      (credKey === 'supergrokpro' ||
+        normalizeGrokPlanKey(billing?.plan) === 'supergrok' ||
+        normalizeGrokPlanKey(billing?.plan) === 'supergrokpro')
+    ) {
+      return 'SuperGrok Heavy'
+    }
+    if (credKey === 'supergrokpro') {
+      return firstNonBlankString(billing?.plan) || 'SuperGrok'
+    }
+    return firstNonBlankString(
+      billing?.plan,
+      usage?.subscription_tier,
+      legacyQuota?.subscription_tier,
+      extra.subscription_tier,
+      row.credentials?.plan_type,
+      row.parent_plan_type
     )
   }
-  return row.credentials?.plan_type || row.parent_plan_type || undefined
+  return firstNonBlankString(row.credentials?.plan_type, row.parent_plan_type)
 }
 
 function getOpenAIAuthMode(row: any): string | undefined {
@@ -1390,6 +1707,7 @@ const allColumns = computed(() => {
     { key: 'priority', label: t('admin.accounts.columns.priority'), sortable: true },
     { key: 'scheduler_score', label: t('admin.accounts.columns.schedulerScore'), sortable: false },
     { key: 'rate_multiplier', label: t('admin.accounts.columns.billingRateMultiplier'), sortable: true },
+    { key: 'upstream_billing_rate', label: t('admin.accounts.columns.upstreamBillingRate'), sortable: true },
     { key: 'last_used_at', label: t('admin.accounts.columns.lastUsed'), sortable: true },
     { key: 'created_at', label: t('admin.accounts.columns.createdAt'), sortable: true },
     { key: 'expires_at', label: t('admin.accounts.columns.expiresAt'), sortable: true },
@@ -1832,6 +2150,8 @@ const patchAccountInList = (updatedAccount: Account) => {
 const patchUpstreamBillingSnapshot = (accountID: number, snapshot: UpstreamBillingProbeSnapshot) => {
   const account = accounts.value.find(item => item.id === accountID)
   if (!account) return
+  markUpstreamBillingSortRefresh()
+  upstreamBillingNow.value = Date.now()
   patchAccountInList({
     ...account,
     extra: { ...account.extra, upstream_billing_probe: snapshot }
@@ -1842,6 +2162,22 @@ const refreshAccountsAfterUpstreamBillingProbe = async () => {
     await load()
   } catch (error) {
     console.error('Failed to refresh accounts after upstream billing probe:', error)
+  }
+}
+const handleProbeUpstreamBilling = async (account: Account) => {
+  if (probingUpstreamBilling.has(account.id)) return
+  probingUpstreamBilling.add(account.id)
+  try {
+    const result = await adminAPI.accounts.probeUpstreamBilling(account.id)
+    if (result.snapshot) {
+      patchUpstreamBillingSnapshot(account.id, result.snapshot)
+      await refreshAccountsAfterUpstreamBillingProbe()
+    }
+  } catch (error) {
+    console.error('Failed to probe upstream billing:', error)
+    appStore.showError(extractApiErrorMessage(error, t('admin.accounts.upstreamBilling.probeFailed')))
+  } finally {
+    probingUpstreamBilling.delete(account.id)
   }
 }
 const handleAccountUpdated = (updatedAccount: Account) => {
@@ -2103,7 +2439,21 @@ const handleClickOutside = (event: MouseEvent) => {
 }
 
 onMounted(async () => {
+  if (typeof window !== 'undefined') {
+    desktopViewportMediaQuery = window.matchMedia(desktopViewportQuery)
+    isDesktopViewport.value = desktopViewportMediaQuery.matches
+    desktopViewportListener = (event: MediaQueryListEvent) => {
+      isDesktopViewport.value = event.matches
+    }
+    if (typeof desktopViewportMediaQuery.addEventListener === 'function') {
+      desktopViewportMediaQuery.addEventListener('change', desktopViewportListener)
+    } else {
+      desktopViewportMediaQuery.addListener(desktopViewportListener)
+    }
+  }
+
   load()
+  loadUpstreamBillingProbeGlobalState()
   try {
     const [p, g] = await Promise.all([adminAPI.proxies.getAll(), adminAPI.groups.getAll()])
     proxies.value = p
@@ -2124,9 +2474,23 @@ onMounted(async () => {
 })
 
 onUnmounted(() => {
+  if (usageBatchFlushTimer !== null) {
+    clearTimeout(usageBatchFlushTimer)
+    usageBatchFlushTimer = null
+  }
+  pendingUsageBatchIds.clear()
   window.removeEventListener('scroll', handleScroll, true)
   window.removeEventListener('resize', handleViewportResize)
   document.removeEventListener('click', handleClickOutside)
+  if (desktopViewportMediaQuery && desktopViewportListener) {
+    if (typeof desktopViewportMediaQuery.removeEventListener === 'function') {
+      desktopViewportMediaQuery.removeEventListener('change', desktopViewportListener)
+    } else {
+      desktopViewportMediaQuery.removeListener(desktopViewportListener)
+    }
+  }
+  desktopViewportListener = null
+  desktopViewportMediaQuery = null
 })
 </script>
 

@@ -2,16 +2,66 @@
   <AppLayout>
     <div class="space-y-6">
       <UsageStatsCards :stats="usageStats" />
-      <div class="card p-4">
-        <div class="flex flex-wrap items-center gap-4">
-          <div class="flex items-center gap-2">
-            <span class="text-sm font-medium text-gray-700 dark:text-gray-300">{{ t('admin.dashboard.timeRange') }}:</span>
-            <DateRangePicker
-              v-model:start-date="startDate"
-              v-model:end-date="endDate"
-              @change="onDateRangeChange"
-            />
+      <!-- Charts Section -->
+      <div class="space-y-4">
+        <div class="card p-4">
+          <div class="flex flex-wrap items-center gap-4">
+            <div class="flex items-center gap-2">
+              <span class="text-sm font-medium text-gray-700 dark:text-gray-300">{{ t('admin.dashboard.timeRange') }}:</span>
+              <DateRangePicker
+                v-model:start-date="startDate"
+                v-model:end-date="endDate"
+                @change="onDateRangeChange"
+              />
+            </div>
+            <div class="ml-auto flex items-center gap-2">
+              <span class="text-sm font-medium text-gray-700 dark:text-gray-300">{{ t('admin.dashboard.granularity') }}:</span>
+              <div class="w-28">
+                <Select v-model="granularity" :options="granularityOptions" @change="loadChartData" />
+              </div>
+            </div>
           </div>
+        </div>
+        <div class="grid grid-cols-1 gap-6 lg:grid-cols-2">
+          <ModelDistributionChart
+            v-model:source="modelDistributionSource"
+            v-model:metric="modelDistributionMetric"
+            :model-stats="requestedModelStats"
+            :upstream-model-stats="upstreamModelStats"
+            :mapping-model-stats="mappingModelStats"
+            :loading="modelStatsLoading"
+            :show-source-toggle="true"
+            :show-metric-toggle="true"
+            :start-date="startDate"
+            :end-date="endDate"
+            :filters="breakdownFilters"
+          />
+          <GroupDistributionChart
+            v-model:metric="groupDistributionMetric"
+            :group-stats="groupStats"
+            :loading="chartsLoading"
+            :show-metric-toggle="true"
+            :start-date="startDate"
+            :end-date="endDate"
+            :filters="breakdownFilters"
+          />
+        </div>
+        <div class="grid grid-cols-1 gap-6 lg:grid-cols-2">
+          <EndpointDistributionChart
+            v-model:source="endpointDistributionSource"
+            v-model:metric="endpointDistributionMetric"
+            :endpoint-stats="inboundEndpointStats"
+            :upstream-endpoint-stats="upstreamEndpointStats"
+            :endpoint-path-stats="endpointPathStats"
+            :loading="endpointStatsLoading"
+            :show-source-toggle="true"
+            :show-metric-toggle="true"
+            :title="t('usage.endpointDistribution')"
+            :start-date="startDate"
+            :end-date="endDate"
+            :filters="breakdownFilters"
+          />
+          <TokenUsageTrend :trend-data="trendData" :loading="chartsLoading" />
         </div>
       </div>
       <!-- 明细区：tab 栏 + 筛选 + 内容收进同一张卡片，消除割裂感 -->
@@ -35,7 +85,7 @@
 
         <UsageFilters v-model="filters" ref="usageFiltersRef" flat :mode="activeTab" class="border-b border-gray-100 dark:border-dark-700/50" :start-date="startDate" :end-date="endDate" :exporting="exporting" :model-options="modelNameOptions" @change="applyFilters" @refresh="refreshData" @reset="resetFilters" @cleanup="openCleanupDialog" @export="exportToExcel">
           <template #after-reset>
-            <div class="relative" ref="columnDropdownRef">
+            <div v-if="activeTab !== 'ranking'" class="relative" ref="columnDropdownRef">
               <button
                 @click="showColumnDropdown = !showColumnDropdown"
                 class="btn btn-secondary px-2 md:px-3"
@@ -80,6 +130,7 @@
             :default-sort-key="'created_at'"
             :default-sort-order="'desc'"
             @sort="handleSort"
+            @userClick="handleUserClick"
             @ipGeoBatchFailed="handleIpGeoBatchFailed"
           />
           <Pagination v-if="pagination.total > 0" :page="pagination.page" :total="pagination.total" :page-size="pagination.page_size" @update:page="handlePageChange" @update:pageSize="handlePageSizeChange" />
@@ -98,6 +149,17 @@
             @update:pageSize="onErrPageSize"
             @ipGeoBatchFailed="handleIpGeoBatchFailed" />
         </div>
+        <!-- 懒挂载：首次切到该 tab 才请求排行数据，之后随筛选自动刷新 -->
+        <div v-if="rankingMounted" v-show="activeTab === 'ranking'" class="overflow-hidden rounded-b-2xl">
+          <UserTokenRanking
+            ref="rankingRef"
+            :start-date="startDate"
+            :end-date="endDate"
+            :filters="breakdownFilters"
+            :model="filters.model"
+            @select-user="handleRankingSelectUser"
+          />
+        </div>
       </div>
       <OpsErrorDetailModal v-model:show="showErrorModal" :error-id="selectedErrorId" :error-type="'request'" />
     </div>
@@ -110,7 +172,7 @@
     :end-date="endDate"
     @close="cleanupDialogVisible = false"
   />
-  <!-- Balance history modal triggered from error table user click -->
+  <!-- Balance history modal triggered from usage table user click -->
   <UserBalanceHistoryModal
     :show="showBalanceHistoryModal"
     :user="balanceHistoryUser"
@@ -120,33 +182,53 @@
 </template>
 
 <script setup lang="ts">
-import { ref, reactive, computed, onMounted, onUnmounted } from 'vue'
+import { ref, reactive, computed, onMounted, onUnmounted, watch } from 'vue'
 import { useI18n } from 'vue-i18n'
 import { saveAs } from 'file-saver'
 import { useRoute } from 'vue-router'
 import { useAppStore } from '@/stores/app'; import { adminAPI } from '@/api/admin'; import { adminUsageAPI } from '@/api/admin/usage'
 import { getPersistedPageSize } from '@/composables/usePersistedPageSize'
 import { formatReasoningEffort } from '@/utils/format'
-import { getUsageClientSourceLabel } from '@/utils/usageClientSource'
 import { resolveUsageRequestType, requestTypeToLegacyStream } from '@/utils/usageRequestType'
-import AppLayout from '@/components/layout/AppLayout.vue'; import Pagination from '@/components/common/Pagination.vue'; import DateRangePicker from '@/components/common/DateRangePicker.vue'
+import AppLayout from '@/components/layout/AppLayout.vue'; import Pagination from '@/components/common/Pagination.vue'; import Select from '@/components/common/Select.vue'; import DateRangePicker from '@/components/common/DateRangePicker.vue'
 import UsageStatsCards from '@/components/admin/usage/UsageStatsCards.vue'; import UsageFilters from '@/components/admin/usage/UsageFilters.vue'
 import UsageTable from '@/components/admin/usage/UsageTable.vue'; import UsageExportProgress from '@/components/admin/usage/UsageExportProgress.vue'
+import UserTokenRanking from '@/components/admin/usage/UserTokenRanking.vue'
 import UsageCleanupDialog from '@/components/admin/usage/UsageCleanupDialog.vue'
 import UserBalanceHistoryModal from '@/components/admin/user/UserBalanceHistoryModal.vue'
 import OpsErrorLogTable from '@/views/admin/ops/components/OpsErrorLogTable.vue'
 import OpsErrorDetailModal from '@/views/admin/ops/components/OpsErrorDetailModal.vue'
 import { listErrorLogs } from '@/api/admin/ops'
 import type { OpsErrorLog } from '@/api/admin/ops'
+import ModelDistributionChart from '@/components/charts/ModelDistributionChart.vue'; import GroupDistributionChart from '@/components/charts/GroupDistributionChart.vue'; import TokenUsageTrend from '@/components/charts/TokenUsageTrend.vue'
+import EndpointDistributionChart from '@/components/charts/EndpointDistributionChart.vue'
 import Icon from '@/components/icons/Icon.vue'
-import type { AdminUsageLog, ModelStat, AdminUser } from '@/types'; import type { AdminUsageStatsResponse, AdminUsageQueryParams } from '@/api/admin/usage'
+import type { AdminUsageLog, TrendDataPoint, ModelStat, GroupStat, EndpointStat, AdminUser } from '@/types'; import type { AdminUsageStatsResponse, AdminUsageQueryParams } from '@/api/admin/usage'
 
 const { t } = useI18n()
 const appStore = useAppStore()
+type DistributionMetric = 'tokens' | 'actual_cost'
+type EndpointSource = 'inbound' | 'upstream' | 'path'
+type ModelDistributionSource = 'requested' | 'upstream' | 'mapping'
 const route = useRoute()
 const usageStats = ref<AdminUsageStatsResponse | null>(null); const usageLogs = ref<AdminUsageLog[]>([]); const loading = ref(false); const exporting = ref(false)
-const requestedModelStats = ref<ModelStat[]>([])
+const trendData = ref<TrendDataPoint[]>([]); const requestedModelStats = ref<ModelStat[]>([]); const upstreamModelStats = ref<ModelStat[]>([]); const mappingModelStats = ref<ModelStat[]>([]); const groupStats = ref<GroupStat[]>([]); const chartsLoading = ref(false); const modelStatsLoading = ref(false); const granularity = ref<'day' | 'hour'>('hour')
+const modelDistributionMetric = ref<DistributionMetric>('tokens')
+const modelDistributionSource = ref<ModelDistributionSource>('requested')
+const loadedModelSources = reactive<Record<ModelDistributionSource, boolean>>({
+  requested: false,
+  upstream: false,
+  mapping: false,
+})
+const groupDistributionMetric = ref<DistributionMetric>('tokens')
+const endpointDistributionMetric = ref<DistributionMetric>('tokens')
+const endpointDistributionSource = ref<EndpointSource>('inbound')
+const inboundEndpointStats = ref<EndpointStat[]>([])
+const upstreamEndpointStats = ref<EndpointStat[]>([])
+const endpointPathStats = ref<EndpointStat[]>([])
+const endpointStatsLoading = ref(false)
 let abortController: AbortController | null = null; let exportAbortController: AbortController | null = null
+let chartReqSeq = 0
 let statsReqSeq = 0
 let modelStatsReqSeq = 0
 const exportProgress = reactive({ show: false, progress: 0, current: 0, total: 0, estimatedTime: '' })
@@ -154,6 +236,17 @@ const cleanupDialogVisible = ref(false)
 // Balance history modal state
 const showBalanceHistoryModal = ref(false)
 const balanceHistoryUser = ref<AdminUser | null>(null)
+
+const breakdownFilters = computed(() => {
+  const f: Record<string, any> = {}
+  if (filters.value.user_id) f.user_id = filters.value.user_id
+  if (filters.value.api_key_id) f.api_key_id = filters.value.api_key_id
+  if (filters.value.account_id) f.account_id = filters.value.account_id
+  if (filters.value.group_id) f.group_id = filters.value.group_id
+  if (filters.value.request_type != null) f.request_type = filters.value.request_type
+  if (filters.value.billing_type != null) f.billing_type = filters.value.billing_type
+  return f
+})
 
 const modelNameOptions = computed(() =>
   Array.from(new Set(requestedModelStats.value.map((m) => m.model).filter(Boolean))).sort()
@@ -169,6 +262,16 @@ const handleUserClick = async (userId: number) => {
   }
 }
 
+// Drill down from the per-user token ranking: scope the whole usage view to
+// that user and jump to the usage-detail tab so the drill-down is visible.
+const handleRankingSelectUser = (userId: number, email: string) => {
+  filters.value = { ...filters.value, user_id: userId }
+  usageFiltersRef.value?.setUserKeyword?.(email || '')
+  activeTab.value = 'usage'
+  applyFilters()
+}
+
+const granularityOptions = computed(() => [{ value: 'day', label: t('admin.dashboard.day') }, { value: 'hour', label: t('admin.dashboard.hour') }])
 // Use local timezone to avoid UTC timezone issues
 const formatLD = (d: Date) => {
   const year = d.getFullYear()
@@ -183,6 +286,12 @@ const getLast24HoursRangeDates = (): { start: string; end: string } => {
     start: formatLD(start),
     end: formatLD(end)
   }
+}
+const getGranularityForRange = (start: string, end: string): 'day' | 'hour' => {
+  const startTime = new Date(`${start}T00:00:00`).getTime()
+  const endTime = new Date(`${end}T00:00:00`).getTime()
+  const daysDiff = Math.ceil((endTime - startTime) / (1000 * 60 * 60 * 24))
+  return daysDiff <= 1 ? 'hour' : 'day'
 }
 const defaultRange = getLast24HoursRangeDates()
 const startDate = ref(defaultRange.start); const endDate = ref(defaultRange.end)
@@ -223,6 +332,7 @@ const applyRouteQueryFilters = () => {
     start_date: startDate.value,
     end_date: endDate.value
   }
+  granularity.value = getGranularityForRange(startDate.value, endDate.value)
 }
 
 const loadRouteUserFilterLabel = async () => {
@@ -253,6 +363,7 @@ const onDateRangeChange = (range: { startDate: string; endDate: string; preset: 
     start_date: range.startDate,
     end_date: range.endDate
   }
+  granularity.value = getGranularityForRange(range.startDate, range.endDate)
   applyFilters()
 }
 
@@ -286,6 +397,7 @@ const loadLogs = async () => {
 }
 const loadStats = async (force = false) => {
   const seq = ++statsReqSeq
+  endpointStatsLoading.value = true
   try {
     const requestType = filters.value.request_type
     const legacyStream = requestType ? requestTypeToLegacyStream(requestType) : filters.value.stream
@@ -296,20 +408,38 @@ const loadStats = async (force = false) => {
     })
     if (seq !== statsReqSeq) return
     usageStats.value = s
+    inboundEndpointStats.value = s.endpoints || []
+    upstreamEndpointStats.value = s.upstream_endpoints || []
+    endpointPathStats.value = s.endpoint_paths || []
   } catch (error) {
     if (seq !== statsReqSeq) return
     console.error('Failed to load usage stats:', error)
+    inboundEndpointStats.value = []
+    upstreamEndpointStats.value = []
+    endpointPathStats.value = []
+  } finally {
+    if (seq === statsReqSeq) endpointStatsLoading.value = false
   }
 }
 
-// 饼图移除后仍加载请求模型名称，供明细区的模型筛选器使用。
-// 请求期间保留旧选项，避免刷新时下拉框闪空。
-const loadModelStats = async () => {
+// 失效模型统计缓存:仅标记需要重取,保留旧数据直到新数据到达(避免刷新时图表闪空)。
+const invalidateModelStatsCache = () => {
+  loadedModelSources.requested = false
+  loadedModelSources.upstream = false
+  loadedModelSources.mapping = false
+}
+
+const loadModelStats = async (source: ModelDistributionSource, force = false) => {
+  if (!force && loadedModelSources[source]) {
+    return
+  }
+
   const seq = ++modelStatsReqSeq
+  modelStatsLoading.value = true
   try {
     const requestType = filters.value.request_type
     const legacyStream = requestType ? requestTypeToLegacyStream(requestType) : filters.value.stream
-    const response = await adminAPI.dashboard.getModelStats({
+    const baseParams = {
       start_date: filters.value.start_date || startDate.value,
       end_date: filters.value.end_date || endDate.value,
       user_id: filters.value.user_id,
@@ -320,23 +450,75 @@ const loadModelStats = async () => {
       request_type: requestType,
       stream: legacyStream === null ? undefined : legacyStream,
       billing_type: filters.value.billing_type,
-      model_source: 'requested',
-    })
+	  upstream_model_mismatch: filters.value.upstream_model_mismatch,
+    }
+
+    const response = await adminAPI.dashboard.getModelStats({ ...baseParams, model_source: source })
 
     if (seq !== modelStatsReqSeq) return
-    requestedModelStats.value = response.models || []
+
+    const models = response.models || []
+    if (source === 'requested') {
+      requestedModelStats.value = models
+    } else if (source === 'upstream') {
+      upstreamModelStats.value = models
+    } else {
+      mappingModelStats.value = models
+    }
+    loadedModelSources[source] = true
   } catch (error) {
     if (seq !== modelStatsReqSeq) return
     console.error('Failed to load model stats:', error)
-    requestedModelStats.value = []
+    if (source === 'requested') {
+      requestedModelStats.value = []
+    } else if (source === 'upstream') {
+      upstreamModelStats.value = []
+    } else {
+      mappingModelStats.value = []
+    }
+    loadedModelSources[source] = false
+  } finally {
+    if (seq === modelStatsReqSeq) modelStatsLoading.value = false
   }
 }
 
+const loadChartData = async () => {
+  const seq = ++chartReqSeq
+  chartsLoading.value = true
+  try {
+    const requestType = filters.value.request_type
+    const legacyStream = requestType ? requestTypeToLegacyStream(requestType) : filters.value.stream
+    const snapshot = await adminAPI.dashboard.getSnapshotV2({
+      start_date: filters.value.start_date || startDate.value,
+      end_date: filters.value.end_date || endDate.value,
+      granularity: granularity.value,
+      user_id: filters.value.user_id,
+      model: filters.value.model,
+      api_key_id: filters.value.api_key_id,
+      account_id: filters.value.account_id,
+      group_id: filters.value.group_id,
+      request_type: requestType,
+      stream: legacyStream === null ? undefined : legacyStream,
+      billing_type: filters.value.billing_type,
+	  upstream_model_mismatch: filters.value.upstream_model_mismatch,
+      include_stats: false,
+      include_trend: true,
+      include_model_stats: false,
+      include_group_stats: true,
+      include_users_trend: false
+    })
+    if (seq !== chartReqSeq) return
+    trendData.value = snapshot.trend || []
+    groupStats.value = snapshot.groups || []
+  } catch (error) { console.error('Failed to load chart data:', error) } finally { if (seq === chartReqSeq) chartsLoading.value = false }
+}
 const applyFilters = () => {
   pagination.page = 1
+  invalidateModelStatsCache()
   loadLogs()
   loadStats()
-  loadModelStats()
+  loadModelStats(modelDistributionSource.value, true)
+  loadChartData()
   errPage.value = 1
   if (activeTab.value === 'errors') {
     loadAdminErrors()
@@ -345,16 +527,20 @@ const applyFilters = () => {
   }
 }
 const refreshData = () => {
+  invalidateModelStatsCache()
   loadLogs()
   loadStats(true)
-  loadModelStats()
+  loadModelStats(modelDistributionSource.value, true)
+  loadChartData()
   if (activeTab.value === 'errors') loadAdminErrors()
+  if (rankingMounted.value) rankingRef.value?.reload()
 }
 const resetFilters = () => {
   const range = getLast24HoursRangeDates()
   startDate.value = range.start
   endDate.value = range.end
   filters.value = { start_date: startDate.value, end_date: endDate.value, request_type: undefined, billing_type: null, billing_mode: undefined }
+  granularity.value = getGranularityForRange(startDate.value, endDate.value)
   applyFilters()
 }
 const handlePageChange = (p: number) => { pagination.page = p; loadLogs() }
@@ -389,7 +575,7 @@ const exportToExcel = async () => {
     const XLSX = await import('xlsx')
     const headers = [
       t('usage.time'), t('admin.usage.user'), t('usage.apiKeyFilter'),
-      t('admin.usage.account'), t('usage.clientSource'), t('usage.model'), t('usage.upstreamModel'), t('usage.reasoningEffort'), t('admin.usage.group'),
+      t('admin.usage.account'), t('usage.requestedModel'), t('usage.sentUpstreamModel'), t('usage.upstreamResponseModel'), t('usage.upstreamModelMismatch'), t('usage.reasoningEffort'), t('admin.usage.group'),
       t('usage.inboundEndpoint'), t('usage.upstreamEndpoint'),
       t('usage.type'),
       t('admin.usage.inputTokens'), t('admin.usage.outputTokens'),
@@ -408,8 +594,8 @@ const exportToExcel = async () => {
       )
       if (c.signal.aborted) break; if (p === 1) { total = res.total; exportProgress.total = total }
       const rows = (res.items || []).map((log: AdminUsageLog) => [
-        log.created_at, log.user?.email || '', log.api_key?.name || '', log.account?.name || '', getUsageClientSourceLabel(log.client_source, t), log.model,
-        log.upstream_model || '', formatReasoningEffort(log.reasoning_effort), log.group?.name || '',
+        log.created_at, log.user?.email || '', log.api_key?.name || '', log.account?.name || '', log.model,
+        log.upstream_model || log.model, log.upstream_response_model || '', log.upstream_model_mismatch == null ? '' : t(log.upstream_model_mismatch ? 'common.yes' : 'common.no'), formatReasoningEffort(log.reasoning_effort), log.group?.name || '',
         log.inbound_endpoint || '', log.upstream_endpoint || '', getRequestTypeLabel(log),
         log.input_tokens, log.output_tokens, log.cache_read_tokens, log.cache_creation_tokens,
         log.input_cost?.toFixed(6) || '0.000000', log.output_cost?.toFixed(6) || '0.000000',
@@ -438,14 +624,16 @@ const exportToExcel = async () => {
 }
 
 // Column visibility
-const ALWAYS_VISIBLE = ['client_source', 'created_at']
-const DEFAULT_HIDDEN_COLUMNS = ['reasoning_effort', 'user_agent']
+const ALWAYS_VISIBLE = ['user', 'created_at']
+const DEFAULT_HIDDEN_COLUMNS = ['reasoning_effort', 'request_id', 'user_agent']
 const HIDDEN_COLUMNS_KEY = 'usage-hidden-columns'
+const HIDDEN_COLUMNS_VERSION_KEY = 'usage-hidden-columns-version'
+const HIDDEN_COLUMNS_CURRENT_VERSION = 'request-id-hidden-by-default'
 
 const allColumns = computed(() => [
+  { key: 'user', label: t('admin.usage.user'), sortable: false },
   { key: 'api_key', label: t('usage.apiKeyFilter'), sortable: false },
   { key: 'account', label: t('admin.usage.account'), sortable: false },
-  { key: 'client_source', label: t('usage.clientSource'), sortable: false },
   { key: 'model', label: t('usage.model'), sortable: true },
   { key: 'reasoning_effort', label: t('usage.reasoningEffort'), sortable: false },
   { key: 'endpoint', label: t('usage.endpoint'), sortable: false },
@@ -456,6 +644,7 @@ const allColumns = computed(() => [
   { key: 'cost', label: t('usage.cost'), sortable: false },
   { key: 'latency', label: t('usage.latency'), sortable: false },
   { key: 'created_at', label: t('usage.time'), sortable: true },
+  { key: 'request_id', label: t('admin.usage.requestId'), sortable: false },
   { key: 'user_agent', label: t('usage.userAgent'), sortable: false },
   { key: 'ip_address', label: t('admin.usage.ipAddress'), sortable: false }
 ])
@@ -482,6 +671,7 @@ const toggleColumn = (key: string) => {
   }
   try {
     localStorage.setItem(HIDDEN_COLUMNS_KEY, JSON.stringify([...hiddenColumns]))
+    localStorage.setItem(HIDDEN_COLUMNS_VERSION_KEY, HIDDEN_COLUMNS_CURRENT_VERSION)
   } catch (e) {
     console.error('Failed to save columns:', e)
   }
@@ -562,10 +752,16 @@ const loadSavedColumns = () => {
       (JSON.parse(saved) as string[]).forEach((key) => {
         hiddenColumns.add(key)
       })
+      if (localStorage.getItem(HIDDEN_COLUMNS_VERSION_KEY) !== HIDDEN_COLUMNS_CURRENT_VERSION) {
+        hiddenColumns.add('request_id')
+        localStorage.setItem(HIDDEN_COLUMNS_KEY, JSON.stringify([...hiddenColumns]))
+        localStorage.setItem(HIDDEN_COLUMNS_VERSION_KEY, HIDDEN_COLUMNS_CURRENT_VERSION)
+      }
     } else {
       DEFAULT_HIDDEN_COLUMNS.forEach((key) => {
         hiddenColumns.add(key)
       })
+      localStorage.setItem(HIDDEN_COLUMNS_VERSION_KEY, HIDDEN_COLUMNS_CURRENT_VERSION)
     }
   } catch {
     DEFAULT_HIDDEN_COLUMNS.forEach((key) => {
@@ -575,17 +771,21 @@ const loadSavedColumns = () => {
 }
 
 // Detail tabs
-type DetailTab = 'usage' | 'errors'
+type DetailTab = 'usage' | 'errors' | 'ranking'
 const activeTab = ref<DetailTab>('usage')
 const detailTabs = computed(() => [
   { key: 'usage' as const, label: t('usage.tabs.usage'), icon: 'document' as const },
   { key: 'errors' as const, label: t('usage.tabs.errors'), icon: 'exclamationTriangle' as const },
+  { key: 'ranking' as const, label: t('usage.tabs.ranking'), icon: 'chart' as const },
 ])
 const usageFiltersRef = ref<InstanceType<typeof UsageFilters> | null>(null)
+const rankingMounted = ref(false)
+const rankingRef = ref<InstanceType<typeof UserTokenRanking> | null>(null)
 
 const switchTab = (tab: DetailTab) => {
   activeTab.value = tab
   if (tab === 'errors' && errRows.value.length === 0) loadAdminErrors()
+  if (tab === 'ranking') rankingMounted.value = true
 }
 
 // Error tab state
@@ -657,12 +857,19 @@ onMounted(() => {
   void loadRouteUserFilterLabel()
   loadLogs()
   loadStats()
-  loadModelStats()
+  loadModelStats(modelDistributionSource.value, true)
+  window.setTimeout(() => {
+    void loadChartData()
+  }, 120)
   loadSavedColumns()
   loadSavedErrColumns()
   document.addEventListener('click', handleColumnClickOutside)
 })
 onUnmounted(() => { abortController?.abort(); exportAbortController?.abort(); document.removeEventListener('click', handleColumnClickOutside) })
+
+watch(modelDistributionSource, (source) => {
+  void loadModelStats(source)
+})
 
 defineExpose({ requestedModelStats, refreshData })
 </script>
