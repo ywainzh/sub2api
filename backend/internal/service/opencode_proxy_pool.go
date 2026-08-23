@@ -18,7 +18,6 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
-	"regexp"
 	"sort"
 	"strconv"
 	"strings"
@@ -28,11 +27,13 @@ import (
 	"gopkg.in/yaml.v3"
 
 	infraerrors "github.com/Wei-Shaw/sub2api/internal/pkg/errors"
+	"github.com/Wei-Shaw/sub2api/internal/pkg/httpclient"
 )
 
 const (
-	OpenCodeModelSnapshotSettingKey = "opencode_zen_free_models_v1"
-	openCodePricingURL              = "https://opencode.ai/docs/zen"
+	OpenCodeModelSnapshotSettingKey = "opencode_zen_free_models_v2"
+	openCodeZenModelsURL            = OpenCodeZenBaseURL + "/models"
+	openCodeZenModelsMaxBytes       = int64(4 << 20)
 	openCodeSubscriptionMaxBytes    = int64(8 << 20)
 	openCodeProbeTimeout            = 20 * time.Second
 	openCodeNodeProbeFreshness      = 15 * time.Minute
@@ -167,6 +168,13 @@ type OpenCodeModelRegistryStatus struct {
 	LastFetchedAt *time.Time `json:"last_fetched_at"`
 	LastError     string     `json:"last_error,omitempty"`
 	UsingBaseline bool       `json:"using_baseline"`
+	// Source 取值 baseline / snapshot / live，UsingBaseline == (Source == "baseline") 为派生不变式。
+	Source      string   `json:"source,omitempty"`
+	LiveIDs     []string `json:"live_ids,omitempty"`
+	ZeroCostIDs []string `json:"zero_cost_ids,omitempty"`
+	PreviousIDs []string `json:"previous_ids,omitempty"`
+	Added       []string `json:"added,omitempty"`
+	Removed     []string `json:"removed,omitempty"`
 }
 
 type OpenCodePool struct {
@@ -187,10 +195,15 @@ type OpenCodePool struct {
 	FailedNodes           int        `json:"failed_nodes"`
 	ProbeIntervalMinutes  int        `json:"probe_interval_minutes"`
 	ServerDirectStatus    string     `json:"server_direct_status,omitempty"`
-	CreatedAt             time.Time  `json:"created_at"`
-	UpdatedAt             time.Time  `json:"updated_at"`
-	UpstreamKeyCiphertext string     `json:"-"`
-	Group                 *Group     `json:"-"`
+	AnonymousLaneEnabled  bool       `json:"anonymous_lane_enabled"`
+	// AnonymousWorkerLimit 为 0 表示不限量（铺满全部合格节点）。
+	AnonymousWorkerLimit   int       `json:"anonymous_worker_limit"`
+	ActiveKeyedWorkers     int       `json:"active_keyed_workers"`
+	ActiveAnonymousWorkers int       `json:"active_anonymous_workers"`
+	CreatedAt              time.Time `json:"created_at"`
+	UpdatedAt              time.Time `json:"updated_at"`
+	UpstreamKeyCiphertext  string    `json:"-"`
+	Group                  *Group    `json:"-"`
 }
 
 type OpenCodePoolWorker struct {
@@ -201,6 +214,7 @@ type OpenCodePoolWorker struct {
 	ProxyID            *int64     `json:"proxy_id"`
 	DisplayName        string     `json:"display_name"`
 	EgressMode         string     `json:"egress_mode"`
+	Lane               string     `json:"lane"`
 	ExitIP             string     `json:"exit_ip,omitempty"`
 	Status             string     `json:"status"`
 	ErrorReason        string     `json:"error_reason,omitempty"`
@@ -213,11 +227,13 @@ type OpenCodePoolWorker struct {
 }
 
 type OpenCodePoolUpdate struct {
-	Enabled             *bool
-	IncludeServerDirect *bool
-	WorkerConcurrency   *int
-	UpstreamAPIKey      *string
-	ClearUpstreamAPIKey bool
+	Enabled              *bool
+	IncludeServerDirect  *bool
+	WorkerConcurrency    *int
+	UpstreamAPIKey       *string
+	ClearUpstreamAPIKey  bool
+	AnonymousLaneEnabled *bool
+	AnonymousWorkerLimit *int
 }
 
 type OpenCodePoolBindingMutation struct {
@@ -250,7 +266,7 @@ type OpenCodeProxyPoolRepository interface {
 	ListTombstonedNodeKeys(context.Context, int64) (map[string]struct{}, error)
 	ReconcileEgressLeases(context.Context) ([]int64, error)
 	IsManagedProxy(context.Context, int64) (bool, error)
-	AcquireEgressLease(context.Context, int64, *int64, string, string, time.Time) error
+	AcquireEgressLease(context.Context, int64, *int64, string, string, string, time.Time) error
 	ReleaseEgressLease(context.Context, int64) error
 	EnsureDefaultPool(context.Context) (*OpenCodePool, error)
 	GetOpenCodePool(context.Context) (*OpenCodePool, error)
@@ -303,12 +319,17 @@ func NewOpenCodeProxyPoolService(repo OpenCodeProxyPoolRepository, encryptor Sec
 	if proxyHost == "" {
 		proxyHost = "opencode-mihomo"
 	}
+	sharedClient, err := httpclient.GetClient(httpclient.Options{Timeout: openCodeProbeTimeout})
+	if err != nil {
+		slog.Warn("opencode_shared_http_client_init_failed", "error", err)
+		sharedClient = &http.Client{Timeout: openCodeProbeTimeout}
+	}
 	svc := &OpenCodeProxyPoolService{
 		repo: repo, encryptor: encryptor, settingRepo: settingRepo, accountRepo: accountRepo,
-		httpClient: &http.Client{Timeout: openCodeProbeTimeout},
+		httpClient: sharedClient,
 		controller: controller, secret: strings.TrimSpace(os.Getenv("OPENCODE_MIHOMO_SECRET")),
 		configDir: configDir, proxyHost: proxyHost, stop: make(chan struct{}),
-		modelStatus: OpenCodeModelRegistryStatus{IDs: defaultOpenCodeFreeModels.IDs(), Count: len(defaultOpenCodeFreeModels.IDs()), UsingBaseline: true},
+		modelStatus: OpenCodeModelRegistryStatus{IDs: defaultOpenCodeFreeModels.IDs(), Count: len(defaultOpenCodeFreeModels.IDs()), UsingBaseline: true, Source: "baseline"},
 	}
 	for _, dep := range deps {
 		switch typed := dep.(type) {
@@ -342,6 +363,9 @@ func (s *OpenCodeProxyPoolService) Start() {
 		refreshCtx, refreshCancel := context.WithTimeout(context.Background(), 30*time.Second)
 		_, _ = s.RefreshModels(refreshCtx)
 		refreshCancel()
+		if dead := deadOpenCodeEffortAliases(); len(dead) > 0 {
+			slog.Warn("opencode_effort_alias_dead", "aliases", dead)
+		}
 		modelTicker := time.NewTicker(6 * time.Hour)
 		syncTicker := time.NewTicker(time.Minute)
 		retryTicker := time.NewTicker(time.Minute)
@@ -1290,7 +1314,7 @@ func (s *OpenCodeProxyPoolService) ValidateAccountEgress(ctx context.Context, ac
 			return fmt.Errorf("%w: %s", ErrOpenCodeProxyUnhealthy, result.FailureType)
 		}
 		if acquire {
-			return s.repo.AcquireEgressLease(ctx, account.ID, nil, mode, result.ExitIP, time.Now().UTC())
+			return s.repo.AcquireEgressLease(ctx, account.ID, nil, mode, result.ExitIP, account.GetOpenCodeLane(), time.Now().UTC())
 		}
 		return nil
 	}
@@ -1330,7 +1354,7 @@ func (s *OpenCodeProxyPoolService) ValidateAccountEgress(ctx context.Context, ac
 		return fmt.Errorf("%w: %s", ErrOpenCodeProxyUnhealthy, selected.HealthStatus)
 	}
 	if acquire {
-		return s.repo.AcquireEgressLease(ctx, account.ID, account.ProxyID, mode, selected.ExitIP, time.Now().UTC())
+		return s.repo.AcquireEgressLease(ctx, account.ID, account.ProxyID, mode, selected.ExitIP, account.GetOpenCodeLane(), time.Now().UTC())
 	}
 	return nil
 }
@@ -1560,67 +1584,114 @@ func (s *OpenCodeProxyPoolService) LoadModelSnapshot(ctx context.Context) error 
 		return errors.New("invalid OpenCode model snapshot")
 	}
 	defaultOpenCodeFreeModels.Replace(snapshot.IDs)
+	snapshot.UsingBaseline = false
+	snapshot.Source = "snapshot"
 	s.modelMu.Lock()
 	s.modelStatus = snapshot
 	s.modelMu.Unlock()
 	return nil
 }
 
-func parseOpenCodeFreeModelIDs(html string) []string {
-	tablePattern := regexpMustCompile(`(?is)<table[^>]*>(.*?)</table>`)
-	rowPattern := regexpMustCompile(`(?is)<tr[^>]*>(.*?)</tr>`)
-	cellPattern := regexpMustCompile(`(?is)<td[^>]*>(.*?)</td>`)
-	tagPattern := regexpMustCompile(`(?is)<[^>]+>`)
-	set := make(map[string]struct{})
-	for _, table := range tablePattern.FindAllStringSubmatch(html, -1) {
-		if !strings.Contains(strings.ToLower(table[1]), "cached") || !strings.Contains(strings.ToLower(table[1]), "model") {
-			continue
-		}
-		for _, row := range rowPattern.FindAllStringSubmatch(table[1], -1) {
-			cells := cellPattern.FindAllStringSubmatch(row[1], -1)
-			if len(cells) < 3 {
-				continue
-			}
-			clean := func(value string) string { return strings.TrimSpace(tagPattern.ReplaceAllString(value, "")) }
-			if strings.EqualFold(clean(cells[1][1]), "Free") && strings.EqualFold(clean(cells[2][1]), "Free") {
-				if id := normalizeOpenCodeModelID(clean(cells[0][1])); id != "" {
-					set[id] = struct{}{}
-				}
-			}
-		}
+func (s *OpenCodeProxyPoolService) fetchOpenCodeCatalog(ctx context.Context, endpoint string, maxBytes int64) ([]byte, error) {
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, endpoint, nil)
+	if err != nil {
+		return nil, err
 	}
-	ids := make([]string, 0, len(set))
-	for id := range set {
-		ids = append(ids, id)
-	}
-	sort.Strings(ids)
-	return ids
-}
-
-func regexpMustCompile(pattern string) *regexp.Regexp { return regexp.MustCompile(pattern) }
-
-func (s *OpenCodeProxyPoolService) RefreshModels(ctx context.Context) (*OpenCodeModelRegistryStatus, error) {
-	req, _ := http.NewRequestWithContext(ctx, http.MethodGet, openCodePricingURL, nil)
 	req.Header.Set("User-Agent", "sub2api-opencode/1.0")
 	resp, err := s.httpClient.Do(req)
 	if err != nil {
+		return nil, fmt.Errorf("fetch %s: %w", endpoint, err)
+	}
+	defer func() { _ = resp.Body.Close() }()
+	if resp.StatusCode != http.StatusOK {
+		return nil, fmt.Errorf("fetch %s: HTTP %d", endpoint, resp.StatusCode)
+	}
+	body, err := io.ReadAll(io.LimitReader(resp.Body, maxBytes))
+	if err != nil {
+		return nil, fmt.Errorf("read %s: %w", endpoint, err)
+	}
+	return body, nil
+}
+
+// parseOpenCodeLiveModelIDs 解析 /zen/v1/models 返回的标准 OpenAI 目录响应。
+func parseOpenCodeLiveModelIDs(data []byte) ([]string, error) {
+	var payload struct {
+		Data []struct {
+			ID string `json:"id"`
+		} `json:"data"`
+	}
+	if err := json.Unmarshal(data, &payload); err != nil {
+		return nil, fmt.Errorf("decode zen model catalog: %w", err)
+	}
+	ids := make([]string, 0, len(payload.Data))
+	for _, item := range payload.Data {
+		if normalized := normalizeOpenCodeModelID(item.ID); normalized != "" {
+			ids = append(ids, normalized)
+		}
+	}
+	if len(ids) == 0 {
+		return nil, errors.New("zen model catalog is empty")
+	}
+	sort.Strings(ids)
+	return ids, nil
+}
+
+// RefreshModels 用两个上游目录的交集重建免费模型注册表。
+//
+// 来源 A（openCodeZenModelsURL，不带 Authorization，与 probeNode 一致）决定「可路由」，
+// 来源 B（models.dev）决定「零成本」。旧实现抓 docs 页 HTML 表格的展示名列再 slug 化，
+// 而同一展示名在 Zen 与 Go 两个 tier 下对应不同 ID，于是把 Go tier 的 ox-alpha-free
+// 写进了 Zen 注册表；请求它返回 401 ModelError，被当成凭据失效连锁禁用了 11 个账号。
+// 交集规则从构造上排除这类跨 tier 串味：ox-alpha-free 不在来源 A 也不在来源 B。
+//
+// 任一来源失败或交集为空时保留旧集合并只记 LastError——宁可发一份陈旧列表，
+// 也好过让注册表清空导致所有模型 403。
+func (s *OpenCodeProxyPoolService) RefreshModels(ctx context.Context) (*OpenCodeModelRegistryStatus, error) {
+	liveBody, err := s.fetchOpenCodeCatalog(ctx, openCodeZenModelsURL, openCodeZenModelsMaxBytes)
+	if err != nil {
 		return s.recordModelError(err)
 	}
-	body, readErr := io.ReadAll(io.LimitReader(resp.Body, 4<<20))
-	_ = resp.Body.Close()
-	if readErr != nil || resp.StatusCode != http.StatusOK {
-		return s.recordModelError(fmt.Errorf("pricing page HTTP %d", resp.StatusCode))
+	liveIDs, err := parseOpenCodeLiveModelIDs(liveBody)
+	if err != nil {
+		return s.recordModelError(err)
 	}
-	ids := parseOpenCodeFreeModelIDs(string(body))
+	catalogBody, err := s.fetchOpenCodeCatalog(ctx, openCodeModelsDevURL, openCodeModelsDevMaxBytes)
+	if err != nil {
+		return s.recordModelError(err)
+	}
+	zeroCostIDs, err := parseOpenCodeZeroCostModelIDs(catalogBody)
+	if err != nil {
+		return s.recordModelError(err)
+	}
+
+	ids := intersectOpenCodeModelIDs(liveIDs, zeroCostIDs)
 	if len(ids) == 0 {
-		return s.recordModelError(errors.New("pricing page parsed zero free models"))
+		// 两个来源都健康却无交集，需要人工介入，不是普通抓取失败。
+		slog.Error("opencode_free_model_intersection_empty", "live_count", len(liveIDs), "zero_cost_count", len(zeroCostIDs))
+		return s.recordModelError(errors.New("no zero-cost model is routable in the live OpenCode Zen catalog"))
 	}
+
+	previous := defaultOpenCodeFreeModels.IDs()
+	added, removed := defaultOpenCodeFreeModels.ReplaceStrict(ids)
 	now := time.Now().UTC()
-	status := OpenCodeModelRegistryStatus{IDs: ids, Count: len(ids), LastFetchedAt: &now}
-	defaultOpenCodeFreeModels.Replace(ids)
+	status := OpenCodeModelRegistryStatus{
+		IDs:           ids,
+		Count:         len(ids),
+		LastFetchedAt: &now,
+		Source:        "live",
+		LiveIDs:       liveIDs,
+		ZeroCostIDs:   zeroCostIDs,
+		PreviousIDs:   previous,
+		Added:         added,
+		Removed:       removed,
+	}
 	s.modelMu.Lock()
 	s.modelStatus = status
 	s.modelMu.Unlock()
+	if len(added)+len(removed) > 0 {
+		slog.Warn("opencode_free_model_registry_changed",
+			"added", added, "removed", removed, "count", len(ids), "previous_count", len(previous))
+	}
 	if s.settingRepo != nil {
 		encoded, _ := json.Marshal(status)
 		if err := s.settingRepo.Set(ctx, OpenCodeModelSnapshotSettingKey, string(encoded)); err != nil {
@@ -1636,15 +1707,28 @@ func (s *OpenCodeProxyPoolService) RefreshModels(ctx context.Context) (*OpenCode
 func (s *OpenCodeProxyPoolService) recordModelError(err error) (*OpenCodeModelRegistryStatus, error) {
 	s.modelMu.Lock()
 	s.modelStatus.LastError = err.Error()
-	status := s.modelStatus
+	status := cloneOpenCodeModelRegistryStatus(s.modelStatus)
 	s.modelMu.Unlock()
 	return &status, err
 }
 
 func (s *OpenCodeProxyPoolService) ModelStatus() OpenCodeModelRegistryStatus {
 	s.modelMu.RLock()
-	status := s.modelStatus
+	status := cloneOpenCodeModelRegistryStatus(s.modelStatus)
 	s.modelMu.RUnlock()
+	return status
+}
+
+func cloneOpenCodeModelRegistryStatus(status OpenCodeModelRegistryStatus) OpenCodeModelRegistryStatus {
 	status.IDs = append([]string(nil), status.IDs...)
+	status.LiveIDs = append([]string(nil), status.LiveIDs...)
+	status.ZeroCostIDs = append([]string(nil), status.ZeroCostIDs...)
+	status.PreviousIDs = append([]string(nil), status.PreviousIDs...)
+	status.Added = append([]string(nil), status.Added...)
+	status.Removed = append([]string(nil), status.Removed...)
+	if status.LastFetchedAt != nil {
+		fetchedAt := *status.LastFetchedAt
+		status.LastFetchedAt = &fetchedAt
+	}
 	return status
 }

@@ -3,6 +3,8 @@ package service
 import (
 	"net/http"
 	"strings"
+
+	"github.com/tidwall/gjson"
 )
 
 var upstreamModelNotFoundKeywords = []string{"model not found", "unknown model", "not found"}
@@ -44,6 +46,33 @@ func isOpenAICodexPlanGatedModelError(statusCode int, body []byte) bool {
 		return false
 	}
 	return strings.Contains(normalized, openAICodexPlanGatedModelPhrase)
+}
+
+// openCodeZenModelErrorType 是 OpenCode Zen 在模型不可路由时返回的 error.type。
+// Zen 用 401 同时表达三种含义：AuthError（凭据失效）、CreditsError（余额不足）、
+// ModelError（模型不存在）。只有前两者该禁用账号。
+const openCodeZenModelErrorType = "modelerror"
+
+// isOpenCodeZenModelRejection 判定这个 401 是不是 OpenCode Zen 的「模型不支持」。
+//
+// 事故背景：注册表里混进了 Go tier 的 ox-alpha-free，Zen 侧返回
+// 401 {"error":{"type":"ModelError","message":"Model ox-alpha-free is not supported"}}，
+// 被 handleAuthError 当成凭据失效永久禁用账号，failover 循环逐个换号，33 秒烧掉 11 个。
+// 按 error.type 区分后，这类 401 只冷却「账号×模型」，爆炸半径收敛到一对。
+//
+// 优先精确读 error.type；只有在字段缺失时才退回归一化子串匹配，避免对整个 body
+// 做 Contains 把带有相似措辞的 AuthError 误判成模型问题。
+func isOpenCodeZenModelRejection(statusCode int, body []byte) bool {
+	if statusCode != http.StatusUnauthorized {
+		return false
+	}
+	if errorType := strings.ToLower(strings.TrimSpace(gjson.GetBytes(body, "error.type").String())); errorType != "" {
+		return errorType == openCodeZenModelErrorType
+	}
+	normalized := normalizeModelNotFoundBody(body)
+	return normalized != "" &&
+		strings.Contains(normalized, "model") &&
+		strings.Contains(normalized, "is not supported")
 }
 
 func containsModelNotFoundKeyword(normalizedBody string) bool {

@@ -72,6 +72,34 @@ func (r *openCodeFreeModelRegistry) Replace(ids []string) {
 	r.mu.Unlock()
 }
 
+// ReplaceStrict 无条件安装新集合，并返回相对旧集合的增删差异。
+// 与 Replace 不同，空输入会清空注册表而非静默保留旧值，因此只能在两个上游
+// 目录来源都确认成功后调用；来源失败时应保留旧集合，不要走这里。
+func (r *openCodeFreeModelRegistry) ReplaceStrict(ids []string) (added, removed []string) {
+	next := make(map[string]struct{}, len(ids))
+	for _, id := range ids {
+		if normalized := normalizeOpenCodeModelID(id); normalized != "" {
+			next[normalized] = struct{}{}
+		}
+	}
+	r.mu.Lock()
+	for id := range next {
+		if _, ok := r.ids[id]; !ok {
+			added = append(added, id)
+		}
+	}
+	for id := range r.ids {
+		if _, ok := next[id]; !ok {
+			removed = append(removed, id)
+		}
+	}
+	r.ids = next
+	r.mu.Unlock()
+	sort.Strings(added)
+	sort.Strings(removed)
+	return added, removed
+}
+
 func (r *openCodeFreeModelRegistry) Has(id string) bool {
 	r.mu.RLock()
 	_, ok := r.ids[normalizeOpenCodeModelID(id)]
@@ -112,6 +140,21 @@ var openCodeEffortAliases = map[string]struct {
 	"glm-5.2-max":            {"glm-5.2", "max"},
 	"mimo-v2.5-high":         {"mimo-v2.5", "high"},
 	"mimo-v2.5-max":          {"mimo-v2.5", "max"},
+}
+
+// deadOpenCodeEffortAliases 返回基础模型已不在免费注册表里的推理强度别名。
+// 这类别名会在 transformOpenCodeZenChatBody 里以 ErrOpenCodeModelNotAllowed 失败关闭
+// （403，不是烧号的 401），所以不做特例放行；只在启动时打一条日志，
+// 让运维能看见别名表与上游目录已经脱节，而不是等用户来报 403。
+func deadOpenCodeEffortAliases() []string {
+	dead := make([]string, 0, len(openCodeEffortAliases))
+	for alias, target := range openCodeEffortAliases {
+		if !defaultOpenCodeFreeModels.Has(target.model) {
+			dead = append(dead, alias+"->"+target.model)
+		}
+	}
+	sort.Strings(dead)
+	return dead
 }
 
 func transformOpenCodeZenChatBody(body []byte, model string, stream bool) ([]byte, error) {

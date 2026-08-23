@@ -1,0 +1,12 @@
+-- 清除被污染的免费模型快照。
+--
+-- 旧的 RefreshModels 抓 opencode.ai/docs/zen 的 HTML 表格，取的是「展示名」列再
+-- slug 化。而展示名 "Ox Alpha Free (Unlimited)" 在 Zen 与 Go 两个 tier 下对应
+-- 两个不同 ID：Zen 是 x-preview-f-free，Go 才是 ox-alpha-free。于是 Go tier 的
+-- ID 被写进了 Zen 注册表，请求它返回 401 ModelError，被当成凭据失效连锁禁用了
+-- 11 个健康账号。
+--
+-- 新实现改用 settings key opencode_zen_free_models_v2，本迁移删掉 v1 行是为了
+-- 让「回滚到旧镜像」时毒 ID 不会从磁盘复活。删除本身无损：读不到 key 时注册表
+-- 停在硬编码基线，下一次 RefreshModels 会重新写出 v2 快照。
+DELETE FROM settings WHERE key = 'opencode_zen_free_models_v1';

@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"sort"
 	"strconv"
 	"strings"
 	"time"
@@ -408,12 +409,13 @@ func (r *openCodeProxyPoolRepository) ReconcileEgressLeases(ctx context.Context)
 	type leaseState struct {
 		accountID int64
 		leaseIP   string
+		lane      string
 		exitIP    sql.NullString
 		health    sql.NullString
 		duplicate sql.NullInt64
 	}
 	rows, err := tx.QueryContext(ctx, `
-		SELECT l.account_id, l.exit_ip, n.exit_ip, n.health_status, n.duplicate_of_node_id
+		SELECT l.account_id, l.exit_ip, l.lane, n.exit_ip, n.health_status, n.duplicate_of_node_id
 		FROM opencode_egress_leases l
 		JOIN accounts a ON a.id=l.account_id AND a.deleted_at IS NULL
 		LEFT JOIN managed_proxy_nodes n ON n.proxy_id=a.proxy_id AND n.deleted_at IS NULL
@@ -426,7 +428,7 @@ func (r *openCodeProxyPoolRepository) ReconcileEgressLeases(ctx context.Context)
 	states := make([]leaseState, 0)
 	for rows.Next() {
 		var state leaseState
-		if err := rows.Scan(&state.accountID, &state.leaseIP, &state.exitIP, &state.health, &state.duplicate); err != nil {
+		if err := rows.Scan(&state.accountID, &state.leaseIP, &state.lane, &state.exitIP, &state.health, &state.duplicate); err != nil {
 			_ = rows.Close()
 			return nil, err
 		}
@@ -435,19 +437,26 @@ func (r *openCodeProxyPoolRepository) ReconcileEgressLeases(ctx context.Context)
 	if err := rows.Close(); err != nil {
 		return nil, err
 	}
-	occupied := make(map[string]int64)
-	directRows, err := tx.QueryContext(ctx, `SELECT account_id, exit_ip FROM opencode_egress_leases WHERE egress_mode='server_direct'`)
+	// 抢占判定必须按 (lane, exit_ip) 而不是 exit_ip：迁移 225 之后同一节点上
+	// keyed 与 anonymous 各持一条同 IP 的租约，只按 IP 去重会让后到的那个通道
+	// 每轮巡检都被删租约并置为不可调度。
+	type exitSlot struct {
+		lane   string
+		exitIP string
+	}
+	occupied := make(map[exitSlot]int64)
+	directRows, err := tx.QueryContext(ctx, `SELECT account_id, exit_ip, lane FROM opencode_egress_leases WHERE egress_mode='server_direct'`)
 	if err != nil {
 		return nil, err
 	}
 	for directRows.Next() {
 		var accountID int64
-		var exitIP string
-		if err := directRows.Scan(&accountID, &exitIP); err != nil {
+		var exitIP, lane string
+		if err := directRows.Scan(&accountID, &exitIP, &lane); err != nil {
 			_ = directRows.Close()
 			return nil, err
 		}
-		occupied[exitIP] = accountID
+		occupied[exitSlot{lane: lane, exitIP: exitIP}] = accountID
 	}
 	if err := directRows.Close(); err != nil {
 		return nil, err
@@ -455,8 +464,9 @@ func (r *openCodeProxyPoolRepository) ReconcileEgressLeases(ctx context.Context)
 	stopped := make([]int64, 0)
 	for _, state := range states {
 		desired := strings.ToLower(strings.TrimSpace(state.exitIP.String))
+		slot := exitSlot{lane: state.lane, exitIP: desired}
 		valid := state.exitIP.Valid && desired != "" && state.health.String == "healthy" && !state.duplicate.Valid
-		if owner, claimed := occupied[desired]; valid && claimed && owner != state.accountID {
+		if owner, claimed := occupied[slot]; valid && claimed && owner != state.accountID {
 			valid = false
 		}
 		if !valid {
@@ -466,7 +476,7 @@ func (r *openCodeProxyPoolRepository) ReconcileEgressLeases(ctx context.Context)
 			stopped = append(stopped, state.accountID)
 			continue
 		}
-		occupied[desired] = state.accountID
+		occupied[slot] = state.accountID
 		if desired != state.leaseIP {
 			if _, err := tx.ExecContext(ctx, `UPDATE opencode_egress_leases SET exit_ip=$2, checked_at=NOW(), updated_at=NOW() WHERE account_id=$1`, state.accountID, desired); err != nil {
 				if isOpenCodeUniqueViolation(err) {
@@ -487,10 +497,13 @@ func isOpenCodeUniqueViolation(err error) bool {
 	return errors.As(err, &pqErr) && pqErr != nil && pqErr.Code == "23505"
 }
 
-func (r *openCodeProxyPoolRepository) AcquireEgressLease(ctx context.Context, accountID int64, proxyID *int64, mode, exitIP string, checkedAt time.Time) error {
+func (r *openCodeProxyPoolRepository) AcquireEgressLease(ctx context.Context, accountID int64, proxyID *int64, mode, exitIP, lane string, checkedAt time.Time) error {
 	exitIP = strings.ToLower(strings.TrimSpace(exitIP))
 	if exitIP == "" {
 		return errors.New("exit IP is required")
+	}
+	if lane == "" {
+		lane = service.OpenCodeLaneKeyed
 	}
 	tx, err := r.db.BeginTx(ctx, nil)
 	if err != nil {
@@ -498,7 +511,9 @@ func (r *openCodeProxyPoolRepository) AcquireEgressLease(ctx context.Context, ac
 	}
 	defer func() { _ = tx.Rollback() }()
 	var owner int64
-	err = tx.QueryRowContext(ctx, `SELECT account_id FROM opencode_egress_leases WHERE exit_ip=$1 FOR UPDATE`, exitIP).Scan(&owner)
+	// 必须带 lane：迁移 225 之后同一出口 IP 允许 keyed 与 anonymous 各持一条租约，
+	// 不带 lane 的查询会把同伴通道的租约误判成抢占者。
+	err = tx.QueryRowContext(ctx, `SELECT account_id FROM opencode_egress_leases WHERE exit_ip=$1 AND lane=$2 FOR UPDATE`, exitIP, lane).Scan(&owner)
 	if err != nil && !errors.Is(err, sql.ErrNoRows) {
 		return err
 	}
@@ -506,12 +521,12 @@ func (r *openCodeProxyPoolRepository) AcquireEgressLease(ctx context.Context, ac
 		return fmt.Errorf("%w: %s", service.ErrOpenCodeDuplicateExitIP, exitIP)
 	}
 	_, err = tx.ExecContext(ctx, `
-		INSERT INTO opencode_egress_leases (account_id, proxy_id, egress_mode, exit_ip, checked_at)
-		VALUES ($1,$2,$3,$4,$5)
+		INSERT INTO opencode_egress_leases (account_id, proxy_id, egress_mode, exit_ip, lane, checked_at)
+		VALUES ($1,$2,$3,$4,$5,$6)
 		ON CONFLICT (account_id) DO UPDATE SET proxy_id=EXCLUDED.proxy_id,
 			egress_mode=EXCLUDED.egress_mode, exit_ip=EXCLUDED.exit_ip,
-			checked_at=EXCLUDED.checked_at, updated_at=NOW()`,
-		accountID, proxyID, mode, exitIP, checkedAt,
+			lane=EXCLUDED.lane, checked_at=EXCLUDED.checked_at, updated_at=NOW()`,
+		accountID, proxyID, mode, exitIP, lane, checkedAt,
 	)
 	if isOpenCodeUniqueViolation(err) {
 		return fmt.Errorf("%w: %s", service.ErrOpenCodeDuplicateExitIP, exitIP)
@@ -531,6 +546,7 @@ const openCodePoolColumns = `
 	p.id, p.name, p.group_id, p.enabled,
 	COALESCE(p.upstream_api_key_ciphertext, ''), p.include_server_direct,
 	p.worker_concurrency, p.reconcile_status, COALESCE(p.reconcile_error, ''),
+	p.anonymous_lane_enabled, p.anonymous_worker_limit,
 	p.last_reconciled_at, p.created_at, p.updated_at`
 
 func scanOpenCodePool(scanner interface{ Scan(...any) error }) (*service.OpenCodePool, error) {
@@ -539,6 +555,7 @@ func scanOpenCodePool(scanner interface{ Scan(...any) error }) (*service.OpenCod
 		&pool.ID, &pool.Name, &pool.GroupID, &pool.Enabled,
 		&pool.UpstreamKeyCiphertext, &pool.IncludeServerDirect,
 		&pool.WorkerConcurrency, &pool.ReconcileStatus, &pool.ReconcileError,
+		&pool.AnonymousLaneEnabled, &pool.AnonymousWorkerLimit,
 		&pool.LastReconciledAt, &pool.CreatedAt, &pool.UpdatedAt,
 	); err != nil {
 		return nil, err
@@ -558,9 +575,12 @@ func (r *openCodeProxyPoolRepository) fillOpenCodePoolStats(ctx context.Context,
 			(SELECT COUNT(*) FROM managed_proxy_nodes n JOIN proxy_subscriptions s ON s.id=n.subscription_id AND s.deleted_at IS NULL AND s.enabled=TRUE WHERE n.deleted_at IS NULL AND n.sync_status='active' AND n.health_status='rate_limited'),
 			(SELECT COUNT(*) FROM managed_proxy_nodes n JOIN proxy_subscriptions s ON s.id=n.subscription_id AND s.deleted_at IS NULL AND s.enabled=TRUE WHERE n.deleted_at IS NULL AND n.sync_status='active' AND (n.health_status='duplicate_exit' OR n.duplicate_of_node_id IS NOT NULL)),
 			(SELECT COUNT(*) FROM managed_proxy_nodes n JOIN proxy_subscriptions s ON s.id=n.subscription_id AND s.deleted_at IS NULL AND s.enabled=TRUE WHERE n.deleted_at IS NULL AND n.sync_status='active' AND n.health_status NOT IN ('healthy','rate_limited','duplicate_exit')),
-			COALESCE((SELECT w.status FROM opencode_pool_workers w WHERE w.pool_id=$1 AND w.egress_mode='server_direct' ORDER BY w.id LIMIT 1), '')`, pool.ID).Scan(
+			COALESCE((SELECT w.status FROM opencode_pool_workers w WHERE w.pool_id=$1 AND w.egress_mode='server_direct' AND w.lane='keyed' ORDER BY w.id LIMIT 1), ''),
+			(SELECT COUNT(*) FROM opencode_pool_workers w WHERE w.pool_id=$1 AND w.status='active' AND w.lane='keyed'),
+			(SELECT COUNT(*) FROM opencode_pool_workers w WHERE w.pool_id=$1 AND w.status='active' AND w.lane='anonymous')`, pool.ID).Scan(
 		&pool.ActiveWorkers, &pool.HealthyNodes, &pool.RateLimitedNodes,
 		&pool.DuplicateNodes, &pool.FailedNodes, &pool.ServerDirectStatus,
+		&pool.ActiveKeyedWorkers, &pool.ActiveAnonymousWorkers,
 	); err != nil {
 		return err
 	}
@@ -655,12 +675,15 @@ func (r *openCodeProxyPoolRepository) UpdateOpenCodePool(ctx context.Context, in
 			enabled=$2, upstream_api_key_ciphertext=NULLIF($3,''),
 			include_server_direct=$4, worker_concurrency=$5,
 			reconcile_status=$6, reconcile_error=NULLIF($7,''),
-			last_reconciled_at=$8, updated_at=NOW()
+			last_reconciled_at=$8,
+			anonymous_lane_enabled=$9, anonymous_worker_limit=$10,
+			updated_at=NOW()
 		WHERE id=$1
 		RETURNING `+openCodePoolColumns,
 		input.ID, input.Enabled, input.UpstreamKeyCiphertext,
 		input.IncludeServerDirect, input.WorkerConcurrency,
 		input.ReconcileStatus, input.ReconcileError, input.LastReconciledAt,
+		input.AnonymousLaneEnabled, input.AnonymousWorkerLimit,
 	))
 	if err != nil {
 		return nil, err
@@ -675,7 +698,7 @@ func scanOpenCodePoolWorker(scanner interface{ Scan(...any) error }) (*service.O
 	var worker service.OpenCodePoolWorker
 	if err := scanner.Scan(
 		&worker.ID, &worker.PoolID, &worker.ManagedNodeID, &worker.AccountID,
-		&worker.ProxyID, &worker.DisplayName, &worker.EgressMode, &worker.ExitIP,
+		&worker.ProxyID, &worker.DisplayName, &worker.EgressMode, &worker.Lane, &worker.ExitIP,
 		&worker.Status, &worker.ErrorReason, &worker.HealthStatus,
 		&worker.OpenCodeHTTPStatus, &worker.LastProbeAt, &worker.RateLimitResetAt,
 		&worker.CreatedAt, &worker.UpdatedAt,
@@ -687,7 +710,7 @@ func scanOpenCodePoolWorker(scanner interface{ Scan(...any) error }) (*service.O
 
 const openCodePoolWorkerColumns = `
 	w.id, w.pool_id, w.managed_node_id, w.account_id,
-	a.proxy_id, COALESCE(n.display_name, a.name), w.egress_mode,
+	a.proxy_id, COALESCE(n.display_name, a.name), w.egress_mode, w.lane,
 	COALESCE(w.exit_ip, ''), w.status, COALESCE(w.error_reason, ''),
 	COALESCE(n.health_status, ''), n.opencode_http_status, n.last_probe_at,
 	a.rate_limit_reset_at, w.created_at, w.updated_at`
@@ -752,10 +775,52 @@ func openCodeWorkerCredentials(apiKey string) string {
 	return string(payload)
 }
 
-func openCodeWorkerExtra(poolID int64, mode string, nodeID *int64) string {
+// openCodeReconcileLanes 返回本轮需要物化的通道。匿名通道默认关闭，
+// 关闭时行为与引入 lane 之前逐字节一致。
+func openCodeReconcileLanes(pool service.OpenCodePool) []string {
+	if pool.Enabled && pool.AnonymousLaneEnabled {
+		return []string{service.OpenCodeLaneKeyed, service.OpenCodeLaneAnonymous}
+	}
+	return []string{service.OpenCodeLaneKeyed}
+}
+
+// openCodeLaneUpstreamKey 决定该通道写进账号凭据的 key。匿名通道写空串，
+// 转发层遇到空 token 就不设 Authorization——Zen tier 接受无认证推理，
+// 且匿名额度按出口 IP 独立计量，而池级 key 是单一全局配额桶。
+func openCodeLaneUpstreamKey(lane, upstreamKey string) string {
+	if lane == service.OpenCodeLaneAnonymous {
+		return ""
+	}
+	return upstreamKey
+}
+
+func openCodeWorkerName(lane, suffix string) string {
+	// 前缀必须在最前，才能挺过 truncateRunes(name, 100)。
+	if lane == service.OpenCodeLaneAnonymous {
+		return "OpenCode Anon / " + suffix
+	}
+	return "OpenCode / " + suffix
+}
+
+// openCodeAnonymousLaneNodes 截取匿名通道的灰度子集。
+//
+// 必须按 node.id 重排后再截断：合格节点查询按 latency_ms 排序，而延迟每轮探测都在变，
+// 直接取前 N 会让匿名 worker 在节点间漂移；每漂一次就是一次删租约 + 建租约，
+// 正好制造 duplicate_exit_ip。limit <= 0 表示不限量。
+func openCodeAnonymousLaneNodes(eligible []openCodeEligibleNode, limit int) []openCodeEligibleNode {
+	stable := append([]openCodeEligibleNode(nil), eligible...)
+	sort.Slice(stable, func(i, j int) bool { return stable[i].id < stable[j].id })
+	if limit > 0 && len(stable) > limit {
+		stable = stable[:limit]
+	}
+	return stable
+}
+
+func openCodeWorkerExtra(poolID int64, mode string, nodeID *int64, lane string) string {
 	payload := map[string]any{
 		service.OpenAIProviderModeExtraKey:  service.OpenAIProviderModeOpenCodeZen,
 		service.OpenCodeEgressModeExtraKey:  mode,
+		service.OpenCodeLaneExtraKey:        lane,
 		openai_compat.ExtraKeyResponsesMode: string(openai_compat.ResponsesSupportModeForceChatCompletions),
 		"system_worker":                     "opencode_pool",
 		"opencode_pool_id":                  poolID,
@@ -772,7 +837,7 @@ func acquireOpenCodeWorkerLease(
 	tx *sql.Tx,
 	accountID int64,
 	proxyID *int64,
-	mode, exitIP string,
+	mode, exitIP, lane string,
 ) (bool, error) {
 	normalizedExitIP := strings.ToLower(strings.TrimSpace(exitIP))
 	leaseAcquired := false
@@ -786,9 +851,9 @@ func acquireOpenCodeWorkerLease(
 		// worker still owns the same real egress. Reconciliation must not create a
 		// release/reacquire window in which a later account can steal the lease.
 		if _, err := tx.ExecContext(ctx, `
-			UPDATE opencode_egress_leases SET proxy_id=$2, egress_mode=$3,
+			UPDATE opencode_egress_leases SET proxy_id=$2, egress_mode=$3, lane=$4,
 				checked_at=NOW(), updated_at=NOW() WHERE account_id=$1`,
-			accountID, proxyID, mode); err != nil {
+			accountID, proxyID, mode, lane); err != nil {
 			return false, err
 		}
 		leaseAcquired = true
@@ -805,9 +870,9 @@ func acquireOpenCodeWorkerLease(
 		return true, nil
 	}
 	leaseResult, err := tx.ExecContext(ctx, `
-		INSERT INTO opencode_egress_leases (account_id, proxy_id, egress_mode, exit_ip, checked_at)
-		VALUES ($1,$2,$3,$4,NOW())
-		ON CONFLICT DO NOTHING`, accountID, proxyID, mode, normalizedExitIP)
+		INSERT INTO opencode_egress_leases (account_id, proxy_id, egress_mode, exit_ip, lane, checked_at)
+		VALUES ($1,$2,$3,$4,$5,NOW())
+		ON CONFLICT DO NOTHING`, accountID, proxyID, mode, normalizedExitIP, lane)
 	if err != nil {
 		return false, err
 	}
@@ -828,9 +893,10 @@ func (r *openCodeProxyPoolRepository) upsertOpenCodeWorkerAccount(
 	proxyID *int64,
 	mode, name, exitIP, upstreamKey string,
 	priority int,
+	lane string,
 ) (int64, int64, error) {
 	credentials := openCodeWorkerCredentials(upstreamKey)
-	extra := openCodeWorkerExtra(pool.ID, mode, nodeID)
+	extra := openCodeWorkerExtra(pool.ID, mode, nodeID, lane)
 	resolvedAccountID := int64(0)
 	if accountID != nil && *accountID > 0 {
 		result, err := tx.ExecContext(ctx, `
@@ -871,20 +937,20 @@ func (r *openCodeProxyPoolRepository) upsertOpenCodeWorkerAccount(
 	if workerID != nil && *workerID > 0 {
 		if err := tx.QueryRowContext(ctx, `
 			UPDATE opencode_pool_workers SET account_id=$2, managed_node_id=$3,
-				egress_mode=$4, exit_ip=$5, status='active', error_reason=NULL, updated_at=NOW()
-			WHERE id=$1 RETURNING id`, *workerID, resolvedAccountID, nodeID, mode, exitIP).Scan(&resolvedWorkerID); err != nil {
+				egress_mode=$4, exit_ip=$5, lane=$6, status='active', error_reason=NULL, updated_at=NOW()
+			WHERE id=$1 RETURNING id`, *workerID, resolvedAccountID, nodeID, mode, exitIP, lane).Scan(&resolvedWorkerID); err != nil {
 			return 0, 0, err
 		}
 	} else {
 		if err := tx.QueryRowContext(ctx, `
 			INSERT INTO opencode_pool_workers (
-				pool_id, managed_node_id, account_id, egress_mode, exit_ip, status
-			) VALUES ($1,$2,$3,$4,$5,'active')
-			RETURNING id`, pool.ID, nodeID, resolvedAccountID, mode, exitIP).Scan(&resolvedWorkerID); err != nil {
+				pool_id, managed_node_id, account_id, egress_mode, exit_ip, lane, status
+			) VALUES ($1,$2,$3,$4,$5,$6,'active')
+			RETURNING id`, pool.ID, nodeID, resolvedAccountID, mode, exitIP, lane).Scan(&resolvedWorkerID); err != nil {
 			return 0, 0, err
 		}
 	}
-	leaseAcquired, err := acquireOpenCodeWorkerLease(ctx, tx, resolvedAccountID, proxyID, mode, exitIP)
+	leaseAcquired, err := acquireOpenCodeWorkerLease(ctx, tx, resolvedAccountID, proxyID, mode, exitIP, lane)
 	if err != nil {
 		return 0, 0, err
 	}
@@ -926,31 +992,37 @@ func (r *openCodeProxyPoolRepository) ReconcileOpenCodePoolWorkers(
 		id, accountID    int64
 		nodeID           sql.NullInt64
 		mode             string
+		lane             string
 		rateLimitResetAt sql.NullTime
 	}
+	// 双物化的卡点：索引必须含 lane。只按 nodeID 索引会让同节点的第二个 lane
+	// 被当成重复 worker 在下面的清理循环里禁用掉。
+	type workerSlot struct {
+		nodeID int64
+		lane   string
+	}
 	rows, err := tx.QueryContext(ctx, `
-		SELECT w.id, w.account_id, w.managed_node_id, w.egress_mode, a.rate_limit_reset_at
+		SELECT w.id, w.account_id, w.managed_node_id, w.egress_mode, w.lane, a.rate_limit_reset_at
 		FROM opencode_pool_workers w
 		JOIN accounts a ON a.id=w.account_id
 		WHERE w.pool_id=$1 FOR UPDATE OF w, a`, pool.ID)
 	if err != nil {
 		return nil, err
 	}
-	existingByNode := make(map[int64]existingWorker)
-	var directWorker *existingWorker
+	existingByNode := make(map[workerSlot]existingWorker)
+	directWorkers := make(map[string]existingWorker)
 	allExisting := make([]existingWorker, 0)
 	for rows.Next() {
 		var worker existingWorker
-		if err := rows.Scan(&worker.id, &worker.accountID, &worker.nodeID, &worker.mode, &worker.rateLimitResetAt); err != nil {
+		if err := rows.Scan(&worker.id, &worker.accountID, &worker.nodeID, &worker.mode, &worker.lane, &worker.rateLimitResetAt); err != nil {
 			_ = rows.Close()
 			return nil, err
 		}
 		allExisting = append(allExisting, worker)
 		if worker.nodeID.Valid {
-			existingByNode[worker.nodeID.Int64] = worker
+			existingByNode[workerSlot{nodeID: worker.nodeID.Int64, lane: worker.lane}] = worker
 		} else if worker.mode == service.OpenCodeEgressModeServerDirect {
-			copyWorker := worker
-			directWorker = &copyWorker
+			directWorkers[worker.lane] = worker
 		}
 	}
 	if err := rows.Close(); err != nil {
@@ -984,45 +1056,63 @@ func (r *openCodeProxyPoolRepository) ReconcileOpenCodePoolWorkers(
 	}
 
 	keptWorkers := make(map[int64]struct{})
+	activeLanes := make(map[string]bool)
+	eligibleNodeIDs := make(map[int64]bool, len(eligible))
 	for _, node := range eligible {
-		nodeID, proxyID := node.id, node.proxyID
-		var workerID, accountID *int64
-		if existing, ok := existingByNode[node.id]; ok {
-			if existing.rateLimitResetAt.Valid && existing.rateLimitResetAt.Time.After(time.Now()) {
-				if _, err := tx.ExecContext(ctx, `
-					UPDATE opencode_pool_workers SET status='cooling', error_reason='rate_limited', updated_at=NOW()
-					WHERE id=$1`, existing.id); err != nil {
-					return nil, err
+		eligibleNodeIDs[node.id] = true
+	}
+	for _, lane := range openCodeReconcileLanes(pool) {
+		activeLanes[lane] = true
+		laneNodes := eligible
+		if lane == service.OpenCodeLaneAnonymous {
+			laneNodes = openCodeAnonymousLaneNodes(eligible, pool.AnonymousWorkerLimit)
+		}
+		for _, node := range laneNodes {
+			nodeID, proxyID := node.id, node.proxyID
+			var workerID, accountID *int64
+			if existing, ok := existingByNode[workerSlot{nodeID: node.id, lane: lane}]; ok {
+				if existing.rateLimitResetAt.Valid && existing.rateLimitResetAt.Time.After(time.Now()) {
+					if _, err := tx.ExecContext(ctx, `
+						UPDATE opencode_pool_workers SET status='cooling', error_reason='rate_limited', updated_at=NOW()
+						WHERE id=$1`, existing.id); err != nil {
+						return nil, err
+					}
+					keptWorkers[existing.id] = struct{}{}
+					continue
 				}
-				keptWorkers[existing.id] = struct{}{}
-				continue
+				workerID, accountID = &existing.id, &existing.accountID
 			}
-			workerID, accountID = &existing.id, &existing.accountID
+			resolvedWorkerID, _, err := r.upsertOpenCodeWorkerAccount(
+				ctx, tx, pool, workerID, accountID, &nodeID, &proxyID,
+				service.OpenCodeEgressModeProxy, openCodeWorkerName(lane, node.name),
+				node.exitIP, openCodeLaneUpstreamKey(lane, upstreamKey),
+				openCodeWorkerPriority(node.latencyMs), lane,
+			)
+			if err != nil {
+				return nil, err
+			}
+			keptWorkers[resolvedWorkerID] = struct{}{}
 		}
-		resolvedWorkerID, _, err := r.upsertOpenCodeWorkerAccount(
-			ctx, tx, pool, workerID, accountID, &nodeID, &proxyID,
-			service.OpenCodeEgressModeProxy, "OpenCode / "+node.name, node.exitIP, upstreamKey,
-			openCodeWorkerPriority(node.latencyMs),
-		)
-		if err != nil {
-			return nil, err
-		}
-		keptWorkers[resolvedWorkerID] = struct{}{}
 	}
 
 	if pool.Enabled && pool.IncludeServerDirect && directProbe != nil && directProbe.Success && strings.TrimSpace(directProbe.ExitIP) != "" {
-		if directWorker != nil && directWorker.rateLimitResetAt.Valid && directWorker.rateLimitResetAt.Time.After(time.Now()) {
-			if _, err := tx.ExecContext(ctx, `
-				UPDATE opencode_pool_workers SET status='cooling', error_reason='rate_limited', updated_at=NOW()
-				WHERE id=$1`, directWorker.id); err != nil {
-				return nil, err
+		for _, lane := range openCodeReconcileLanes(pool) {
+			directWorker, hasDirectWorker := directWorkers[lane]
+			if hasDirectWorker && directWorker.rateLimitResetAt.Valid && directWorker.rateLimitResetAt.Time.After(time.Now()) {
+				if _, err := tx.ExecContext(ctx, `
+					UPDATE opencode_pool_workers SET status='cooling', error_reason='rate_limited', updated_at=NOW()
+					WHERE id=$1`, directWorker.id); err != nil {
+					return nil, err
+				}
+				keptWorkers[directWorker.id] = struct{}{}
+				continue
 			}
-			keptWorkers[directWorker.id] = struct{}{}
-		} else {
 			var adoptedAccountID int64
-			if directWorker != nil {
+			if hasDirectWorker {
 				adoptedAccountID = directWorker.accountID
 			} else {
+				// 领养必须带 lane 条件：两个 server_direct lane 并存时，
+				// 不带 lane 的 LIMIT 1 会把另一个 lane 的孤儿账号领错。
 				err := tx.QueryRowContext(ctx, `
 				SELECT a.id FROM accounts a
 				LEFT JOIN opencode_pool_workers w ON w.account_id=a.id
@@ -1030,27 +1120,30 @@ func (r *openCodeProxyPoolRepository) ReconcileOpenCodePoolWorkers(
 					AND a.platform='openai' AND a.type='apikey'
 					AND LOWER(COALESCE(a.extra->>'provider_mode',''))='opencode_zen'
 					AND LOWER(COALESCE(a.extra->>'opencode_egress_mode',''))='server_direct'
-				ORDER BY a.id LIMIT 1 FOR UPDATE OF a`).Scan(&adoptedAccountID)
+					AND LOWER(COALESCE(NULLIF(a.extra->>'opencode_lane',''),'keyed'))=$1
+				ORDER BY a.id LIMIT 1 FOR UPDATE OF a`, lane).Scan(&adoptedAccountID)
 				if err != nil && !errors.Is(err, sql.ErrNoRows) {
 					return nil, err
 				}
 			}
-			if adoptedAccountID > 0 {
-				var workerID *int64
-				if directWorker != nil {
-					workerID = &directWorker.id
-				}
-				resolvedWorkerID, _, err := r.upsertOpenCodeWorkerAccount(
-					ctx, tx, pool, workerID, &adoptedAccountID, nil, nil,
-					service.OpenCodeEgressModeServerDirect, "OpenCode / Server Direct",
-					strings.ToLower(strings.TrimSpace(directProbe.ExitIP)), upstreamKey,
-					openCodeWorkerPriority(directProbe.LatencyMs),
-				)
-				if err != nil {
-					return nil, err
-				}
-				keptWorkers[resolvedWorkerID] = struct{}{}
+			if adoptedAccountID <= 0 {
+				continue
 			}
+			var workerID *int64
+			if hasDirectWorker {
+				workerID = &directWorker.id
+			}
+			resolvedWorkerID, _, err := r.upsertOpenCodeWorkerAccount(
+				ctx, tx, pool, workerID, &adoptedAccountID, nil, nil,
+				service.OpenCodeEgressModeServerDirect, openCodeWorkerName(lane, "Server Direct"),
+				strings.ToLower(strings.TrimSpace(directProbe.ExitIP)),
+				openCodeLaneUpstreamKey(lane, upstreamKey),
+				openCodeWorkerPriority(directProbe.LatencyMs), lane,
+			)
+			if err != nil {
+				return nil, err
+			}
+			keptWorkers[resolvedWorkerID] = struct{}{}
 		}
 	}
 
@@ -1061,7 +1154,16 @@ func (r *openCodeProxyPoolRepository) ReconcileOpenCodePoolWorkers(
 		reason := "pool_disabled"
 		if pool.Enabled {
 			reason = "egress_unavailable"
-			if worker.nodeID.Valid {
+			switch {
+			case !activeLanes[worker.lane]:
+				// 通道被整个关掉（例如匿名开关翻回 FALSE），节点本身没有任何问题。
+				reason = "lane_disabled"
+			case worker.lane == service.OpenCodeLaneAnonymous && worker.nodeID.Valid && eligibleNodeIDs[worker.nodeID.Int64]:
+				// 节点仍然合格，只是落在灰度上限之外。不查节点原因表：
+				// 健康节点会落到 CASE 的兜底分支返回 transport_error，
+				// 缩小 anonymous_worker_limit 会让几百个账号看起来像代理故障。
+				reason = "anonymous_lane_limit"
+			case worker.nodeID.Valid:
 				_ = tx.QueryRowContext(ctx, `
 					SELECT CASE
 						WHEN deleted_at IS NOT NULL OR sync_status<>'active' THEN 'node_missing'

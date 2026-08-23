@@ -120,6 +120,16 @@ func (s *OpenCodeProxyPoolService) UpdatePool(ctx context.Context, update OpenCo
 		}
 		pool.WorkerConcurrency = *update.WorkerConcurrency
 	}
+	if update.AnonymousLaneEnabled != nil {
+		pool.AnonymousLaneEnabled = *update.AnonymousLaneEnabled
+	}
+	if update.AnonymousWorkerLimit != nil {
+		// 0 表示不限量（铺满全部合格节点），上界与迁移 225 的 CHECK 一致。
+		if *update.AnonymousWorkerLimit < 0 || *update.AnonymousWorkerLimit > 5000 {
+			return nil, errors.New("anonymous_worker_limit must be between 0 and 5000")
+		}
+		pool.AnonymousWorkerLimit = *update.AnonymousWorkerLimit
+	}
 	if update.ClearUpstreamAPIKey {
 		pool.UpstreamKeyCiphertext = ""
 	} else if update.UpstreamAPIKey != nil {

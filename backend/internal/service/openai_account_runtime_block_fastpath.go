@@ -165,7 +165,7 @@ func (s *OpenAIGatewayService) markOpenAIOAuth429RateLimited(ctx context.Context
 		}
 	}
 	s.BlockAccountScheduling(account, cooldownUntil, "429")
-	if account.IsOpenCodeZen() && s.rateLimitService != nil && s.rateLimitService.accountRepo != nil {
+	if account.IsOpenCodeZen() && !skipPersistRateLimit(account) && s.rateLimitService != nil && s.rateLimitService.accountRepo != nil {
 		_ = s.rateLimitService.accountRepo.SetRateLimited(ctx, account.ID, cooldownUntil)
 	}
 }

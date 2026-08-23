@@ -1080,9 +1080,30 @@ func (s *RateLimitService) handleCustomErrorCode(ctx context.Context, account *A
 	slog.Warn("account_disabled_custom_error", "account_id", account.ID, "status_code", statusCode, "error", errorMsg)
 }
 
+// skipPersistRateLimit 判断这次限流是否只做内存阻断、不落库。
+//
+// 匿名 lane 的额度按出口 IP 计量，429 是秒级事件。而落库会 UPDATE
+// accounts.rate_limit_reset_at，触发 trg_sync_opencode_worker_account_cooldown
+// 删掉该账号的 egress 租约；租约反复删建会让同伴抢走出口 IP，最终出现
+// duplicate_exit_ip 导致 worker 永久不可调度。内存阻断已足够让调度器避开它。
+//
+// keyed lane 与所有其他平台不受影响：它们共用一个全局配额桶，冷却必须持久化。
+func skipPersistRateLimit(account *Account) bool {
+	return account != nil && account.IsOpenCodeZen() && account.IsOpenCodeAnonymousLane()
+}
+
 // handle429 处理429限流错误
 // 解析响应头获取重置时间，标记账号为限流状态
 func (s *RateLimitService) handle429(ctx context.Context, account *Account, headers http.Header, responseBody []byte) {
+	// 匿名 lane 一次性跳过本函数内全部 SetRateLimited 调用点，
+	// 以及 apply429FallbackRateLimit 与 UpdateSessionWindow。
+	// 前提：内存态调度阻断由 markOpenAIOAuth429RateLimited 在本函数之前完成
+	// （fastpath.go 的 BlockAccountScheduling 不受本守卫影响）。将来若新增绕开
+	// fastpath 的 OpenCode 429 路径，匿名 worker 会零冷却地反复撞同一个被限流的出口 IP。
+	if skipPersistRateLimit(account) {
+		slog.Info("opencode_anonymous_429_memory_only", "account_id", account.ID)
+		return
+	}
 	// Spark 影子：限流/熔断状态 100% 由 QueryUsage(/wham/usage body 的 codex_bengalfox)驱动。
 	// /responses 的 429 携带的 x-codex-*/usage_limit_reached 是 global codex 道(plan/spec §8),
 	// 套到影子会把 spark 误耦合到 global 窗口——即便 spark 仍有配额也会被冷却到 global reset,
@@ -2179,6 +2200,8 @@ const upstreamModelNotFoundCooldown = 30 * time.Minute
 const upstreamModelNotFoundReason = "upstream_404_model_not_found"
 const upstreamCodexPlanGatedModelCooldown = 30 * time.Minute
 const upstreamCodexPlanGatedModelReason = "upstream_400_codex_plan_gated_model"
+const upstreamOpenCodeModelRejectedCooldown = 30 * time.Minute
+const upstreamOpenCodeModelRejectedReason = "upstream_401_opencode_model_rejected"
 const tempUnschedBodyMaxBytes = 64 << 10
 const tempUnschedMessageMaxBytes = 2048
 
@@ -2204,6 +2227,8 @@ func (s *RateLimitService) HandleUpstreamModelNotFound(ctx context.Context, acco
 		cooldown, reason = upstreamModelNotFoundCooldown, upstreamModelNotFoundReason
 	case isOpenAIOAuthAccount(account) && isOpenAICodexPlanGatedModelError(statusCode, responseBody):
 		cooldown, reason = upstreamCodexPlanGatedModelCooldown, upstreamCodexPlanGatedModelReason
+	case account.IsOpenCodeZen() && isOpenCodeZenModelRejection(statusCode, responseBody):
+		cooldown, reason = upstreamOpenCodeModelRejectedCooldown, upstreamOpenCodeModelRejectedReason
 	default:
 		return false
 	}

@@ -2181,8 +2181,13 @@ func (s *AccountTestService) reconcileOpenAI429State(ctx context.Context, accoun
 		return
 	}
 
-	if err := s.accountRepo.SetRateLimited(ctx, account.ID, *resetAt); err != nil {
-		return
+	// 匿名 lane 不落库冷却时间：迁移 225 的触发器只对 keyed lane 删租约，所以这里
+	// 不会抖动租约，但落库的 rate_limit_reset_at 仍会被下一轮 reconcile 读到，
+	// 把匿名 worker 一直挂在 cooling。内存态照常更新，调度阻断不受影响。
+	if !skipPersistRateLimit(account) {
+		if err := s.accountRepo.SetRateLimited(ctx, account.ID, *resetAt); err != nil {
+			return
+		}
 	}
 
 	now := time.Now()

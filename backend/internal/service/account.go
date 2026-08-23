@@ -1287,6 +1287,9 @@ const (
 	OpenCodeEgressModeExtraKey     = "opencode_egress_mode"
 	OpenCodeEgressModeProxy        = "proxy"
 	OpenCodeEgressModeServerDirect = "server_direct"
+	OpenCodeLaneExtraKey           = "opencode_lane"
+	OpenCodeLaneKeyed              = "keyed"
+	OpenCodeLaneAnonymous          = "anonymous"
 	OpenCodeZenBaseURL             = "https://opencode.ai/zen/v1"
 )
 
@@ -1322,6 +1325,28 @@ func (a *Account) GetOpenCodeEgressMode() string {
 		return OpenCodeEgressModeServerDirect
 	}
 	return OpenCodeEgressModeProxy
+}
+
+// GetOpenCodeLane 返回该 worker 账号所属的通道：keyed 用池级共享 API key，
+// anonymous 完全不带 Authorization（Zen tier 接受无认证推理，且额度按出口 IP 计量）。
+//
+// 缺省是 keyed，所以现存 400 个账号无需回填 extra。
+//
+// 绝不能改成用「api_key 为空」推断：池级 key 被清空时 keyed worker 会短暂拿到空 key，
+// 那会让全部 keyed worker 静默翻进匿名通道的 429 语义（不落库冷却），
+// 于是真实的 keyed 限流被丢弃。显式 extra 标记是唯一真源。
+func (a *Account) GetOpenCodeLane() string {
+	if !a.IsOpenCodeZen() {
+		return ""
+	}
+	if strings.EqualFold(strings.TrimSpace(a.GetExtraString(OpenCodeLaneExtraKey)), OpenCodeLaneAnonymous) {
+		return OpenCodeLaneAnonymous
+	}
+	return OpenCodeLaneKeyed
+}
+
+func (a *Account) IsOpenCodeAnonymousLane() bool {
+	return a.GetOpenCodeLane() == OpenCodeLaneAnonymous
 }
 
 func (a *Account) GetOpenAIBaseURL() string {

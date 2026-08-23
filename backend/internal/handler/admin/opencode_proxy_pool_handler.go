@@ -59,11 +59,14 @@ type probeOpenCodeNodesRequest struct {
 }
 
 type updateOpenCodePoolRequest struct {
-	Enabled             *bool   `json:"enabled"`
-	IncludeServerDirect *bool   `json:"include_server_direct"`
-	WorkerConcurrency   *int    `json:"worker_concurrency" binding:"omitempty,min=1,max=100"`
-	UpstreamAPIKey      *string `json:"upstream_api_key"`
-	ClearUpstreamAPIKey bool    `json:"clear_upstream_api_key"`
+	Enabled              *bool   `json:"enabled"`
+	IncludeServerDirect  *bool   `json:"include_server_direct"`
+	WorkerConcurrency    *int    `json:"worker_concurrency" binding:"omitempty,min=1,max=100"`
+	UpstreamAPIKey       *string `json:"upstream_api_key"`
+	ClearUpstreamAPIKey  bool    `json:"clear_upstream_api_key"`
+	AnonymousLaneEnabled *bool   `json:"anonymous_lane_enabled"`
+	// 0 表示不限量（铺满全部合格节点）。
+	AnonymousWorkerLimit *int `json:"anonymous_worker_limit" binding:"omitempty,min=0,max=5000"`
 }
 
 func (h *ProxyHandler) requireOpenCodeProxyPool(c *gin.Context) *service.OpenCodeProxyPoolService {
@@ -380,11 +383,13 @@ func (h *ProxyHandler) UpdateOpenCodePool(c *gin.Context) {
 		return
 	}
 	pool, err := poolService.UpdatePool(c.Request.Context(), service.OpenCodePoolUpdate{
-		Enabled:             req.Enabled,
-		IncludeServerDirect: req.IncludeServerDirect,
-		WorkerConcurrency:   req.WorkerConcurrency,
-		UpstreamAPIKey:      req.UpstreamAPIKey,
-		ClearUpstreamAPIKey: req.ClearUpstreamAPIKey,
+		Enabled:              req.Enabled,
+		IncludeServerDirect:  req.IncludeServerDirect,
+		WorkerConcurrency:    req.WorkerConcurrency,
+		UpstreamAPIKey:       req.UpstreamAPIKey,
+		ClearUpstreamAPIKey:  req.ClearUpstreamAPIKey,
+		AnonymousLaneEnabled: req.AnonymousLaneEnabled,
+		AnonymousWorkerLimit: req.AnonymousWorkerLimit,
 	})
 	if err != nil {
 		writeOpenCodeProxyPoolError(c, err)
