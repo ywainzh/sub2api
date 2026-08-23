@@ -1,8 +1,10 @@
 package service
 
 import (
+	"context"
 	"net/http"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/require"
 )
@@ -72,4 +74,61 @@ func TestSkipPersistRateLimitOnlyForAnonymousOpenCode(t *testing.T) {
 	require.False(t, skipPersistRateLimit(&Account{Platform: PlatformOpenAI, Type: AccountTypeAPIKey}))
 	require.False(t, skipPersistRateLimit(&Account{Platform: PlatformAnthropic}))
 	require.False(t, skipPersistRateLimit(nil))
+}
+
+type setRateLimitedSpyRepo struct {
+	*sessionWindowMockRepo
+	calls []time.Time
+}
+
+func newSetRateLimitedSpy() *setRateLimitedSpyRepo {
+	return &setRateLimitedSpyRepo{sessionWindowMockRepo: &sessionWindowMockRepo{}}
+}
+
+func (r *setRateLimitedSpyRepo) SetRateLimited(_ context.Context, _ int64, resetAt time.Time) error {
+	r.calls = append(r.calls, resetAt)
+	return nil
+}
+
+// handle429 是 429 的第二个持久化写入点，跑在 fastpath 之后。OpenCode Zen 的重置时间
+// 只出现在 Retry-After / x-ratelimit-reset 里，x-codex-* 解析对它恒为 nil；缺了这个分支
+// 就会坠到末尾的全局兜底（5 秒），把 fastpath 刚落库的精确冷却覆盖成秒级。
+func TestHandle429KeepsOpenCodeRetryAfterInsteadOfGlobalFallback(t *testing.T) {
+	spy := newSetRateLimitedSpy()
+	s := &RateLimitService{accountRepo: spy}
+
+	headers := http.Header{}
+	headers.Set("Retry-After", "900")
+	before := time.Now()
+	s.handle429(context.Background(), newOpenCodeZenTestAccount(OpenCodeLaneKeyed), headers, nil)
+
+	require.Len(t, spy.calls, 1)
+	cooldown := spy.calls[0].Sub(before)
+	require.Greater(t, cooldown, 890*time.Second)
+	require.Less(t, cooldown, 910*time.Second)
+}
+
+// 反向对照：真的解析不出重置时间时仍要落全局兜底，不能静默不冷却。
+func TestHandle429FallsBackWhenOpenCodeGivesNoResetTime(t *testing.T) {
+	spy := newSetRateLimitedSpy()
+	s := &RateLimitService{accountRepo: spy}
+
+	before := time.Now()
+	s.handle429(context.Background(), newOpenCodeZenTestAccount(OpenCodeLaneKeyed), http.Header{}, nil)
+
+	require.Len(t, spy.calls, 1)
+	require.Less(t, spy.calls[0].Sub(before),
+		time.Duration(defaultRateLimit429CooldownSeconds)*time.Second+5*time.Second)
+}
+
+// 匿名 lane 的守卫排在最前面：解析得出精确时间也不得落库，否则触发器会删租约。
+func TestHandle429NeverPersistsForAnonymousLane(t *testing.T) {
+	spy := newSetRateLimitedSpy()
+	s := &RateLimitService{accountRepo: spy}
+
+	headers := http.Header{}
+	headers.Set("Retry-After", "900")
+	s.handle429(context.Background(), newOpenCodeZenTestAccount(OpenCodeLaneAnonymous), headers, nil)
+
+	require.Empty(t, spy.calls)
 }

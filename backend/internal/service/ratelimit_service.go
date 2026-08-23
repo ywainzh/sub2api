@@ -1101,7 +1101,9 @@ func (s *RateLimitService) handle429(ctx context.Context, account *Account, head
 	// （fastpath.go 的 BlockAccountScheduling 不受本守卫影响）。将来若新增绕开
 	// fastpath 的 OpenCode 429 路径，匿名 worker 会零冷却地反复撞同一个被限流的出口 IP。
 	if skipPersistRateLimit(account) {
-		slog.Info("opencode_anonymous_429_memory_only", "account_id", account.ID)
+		// Warn 而非 Info：ops_system_logs sink 只索引 Warn 及以上，Info 在生产不可见。
+		// 匿名 lane 的安全性依赖"静默不落库"，没有信号就无法确认守卫是否生效。
+		slog.Warn("opencode_anonymous_429_memory_only", "account_id", account.ID)
 		return
 	}
 	// Spark 影子：限流/熔断状态 100% 由 QueryUsage(/wham/usage body 的 codex_bengalfox)驱动。
@@ -1125,6 +1127,24 @@ func (s *RateLimitService) handle429(ctx context.Context, account *Account, head
 			slog.Info("openai_account_rate_limited", "account_id", account.ID, "reset_at", *resetAt)
 			return
 		}
+	}
+
+	// 1.5 OpenCode Zen：429 的重置时间在 Retry-After / x-ratelimit-reset 里，上面的
+	// x-codex-* 解析对它恒为 nil。若不在这里解析，会一路下坠到末尾的全局秒级兜底，
+	// 把 fastpath 已用 parseOpenCode429ResetAt 落库的精确冷却时间覆盖掉。
+	if account.IsOpenCodeZen() {
+		resetAt := parseOpenCode429ResetAt(headers, responseBody, time.Now())
+		if resetAt == nil {
+			s.apply429FallbackRateLimit(ctx, account, "opencode_no_reset_time")
+			return
+		}
+		s.notifyAccountSchedulingBlocked(account, *resetAt, "429")
+		if err := s.accountRepo.SetRateLimited(ctx, account.ID, *resetAt); err != nil {
+			slog.Warn("rate_limit_set_failed", "account_id", account.ID, "error", err)
+			return
+		}
+		slog.Info("opencode_account_rate_limited", "account_id", account.ID, "reset_at", *resetAt, "reset_in", time.Until(*resetAt).Truncate(time.Second))
+		return
 	}
 
 	// 2. Anthropic 平台：尝试解析 per-window 头（5h / 7d），选择实际触发的窗口
