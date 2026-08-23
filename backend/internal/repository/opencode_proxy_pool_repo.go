@@ -749,9 +749,21 @@ type openCodeEligibleNode struct {
 const (
 	openCodeWorkerDefaultPriority = 50
 	openCodeWorkerLatencyBucketMs = int64(1000)
+	// 匿名 lane 的配额按 (出口 IP × model ID) 独立计量，keyed lane 是全池共享
+	// upstream key 的单个桶。把 keyed 整体排到匿名之后，才能把 IP 池的多桶容量
+	// 用出来，同时让那个单桶留作兜底。
+	openCodeKeyedLanePriorityOffset = openCodeWorkerDefaultPriority
 )
 
-func openCodeWorkerPriority(latencyMs int64) int {
+func openCodeWorkerPriority(latencyMs int64, lane string) int {
+	priority := openCodeWorkerLatencyPriority(latencyMs)
+	if lane != service.OpenCodeLaneAnonymous {
+		priority += openCodeKeyedLanePriorityOffset
+	}
+	return priority
+}
+
+func openCodeWorkerLatencyPriority(latencyMs int64) int {
 	if latencyMs <= 0 {
 		return openCodeWorkerDefaultPriority
 	}
@@ -1086,7 +1098,7 @@ func (r *openCodeProxyPoolRepository) ReconcileOpenCodePoolWorkers(
 				ctx, tx, pool, workerID, accountID, &nodeID, &proxyID,
 				service.OpenCodeEgressModeProxy, openCodeWorkerName(lane, node.name),
 				node.exitIP, openCodeLaneUpstreamKey(lane, upstreamKey),
-				openCodeWorkerPriority(node.latencyMs), lane,
+				openCodeWorkerPriority(node.latencyMs, lane), lane,
 			)
 			if err != nil {
 				return nil, err
@@ -1138,7 +1150,7 @@ func (r *openCodeProxyPoolRepository) ReconcileOpenCodePoolWorkers(
 				service.OpenCodeEgressModeServerDirect, openCodeWorkerName(lane, "Server Direct"),
 				strings.ToLower(strings.TrimSpace(directProbe.ExitIP)),
 				openCodeLaneUpstreamKey(lane, upstreamKey),
-				openCodeWorkerPriority(directProbe.LatencyMs), lane,
+				openCodeWorkerPriority(directProbe.LatencyMs, lane), lane,
 			)
 			if err != nil {
 				return nil, err

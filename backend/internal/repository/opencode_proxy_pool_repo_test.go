@@ -84,9 +84,19 @@ func TestOpenCodeWorkerPriorityUsesStableLatencyBuckets(t *testing.T) {
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
-			require.Equal(t, test.want, openCodeWorkerPriority(test.latencyMs))
+			require.Equal(t, test.want, openCodeWorkerPriority(test.latencyMs, service.OpenCodeLaneAnonymous))
+			require.Equal(t, test.want+openCodeWorkerDefaultPriority, openCodeWorkerPriority(test.latencyMs, service.OpenCodeLaneKeyed))
 		})
 	}
+}
+
+func TestOpenCodeWorkerPriorityRanksEveryAnonymousAheadOfEveryKeyed(t *testing.T) {
+	slowestAnonymous := openCodeWorkerPriority(0, service.OpenCodeLaneAnonymous)
+	fastestKeyed := openCodeWorkerPriority(1, service.OpenCodeLaneKeyed)
+	require.Less(t, slowestAnonymous, fastestKeyed)
+
+	// An unmarked lane must fall back to keyed, never to the preferred band.
+	require.Equal(t, openCodeWorkerPriority(1738, service.OpenCodeLaneKeyed), openCodeWorkerPriority(1738, ""))
 }
 
 func TestUsedListenerPortsIncludesSoftDeletedReservations(t *testing.T) {
