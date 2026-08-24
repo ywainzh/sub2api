@@ -5,11 +5,13 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -195,11 +197,67 @@ func TestReloadMihomoSkipsDirectHTTPNodes(t *testing.T) {
 		ManagedProxyNode: ManagedProxyNode{NodeKey: strings.Repeat("b", 64), TransportMode: "direct_http"},
 		ProxyConfig:      map[string]any{"name": "direct", "type": "http", "server": "192.0.2.10", "port": 8080},
 	}
-	require.NoError(t, service.reloadMihomo(context.Background(), []ManagedProxyNodeDraft{draft}))
+	require.NoError(t, service.reloadMihomoLocked(context.Background(), []ManagedProxyNodeDraft{draft}))
 	require.Equal(t, 1, requests)
 	config, err := os.ReadFile(filepath.Join(service.configDir, "config.yaml"))
 	require.NoError(t, err)
 	require.NotContains(t, string(config), "192.0.2.10")
+}
+
+func TestOpenCodeMihomoConcurrentReloadsKeepDiskMatchingRuntime(t *testing.T) {
+	configDir := t.TempDir()
+	var mu sync.Mutex
+	var lastLoaded []byte
+	controller := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var payload struct {
+			Path string `json:"path"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&payload); err != nil {
+			http.Error(w, err.Error(), http.StatusBadRequest)
+			return
+		}
+		// Mihomo reads the candidate by path, so what it ends up running is
+		// whatever is on disk at this instant — not necessarily what the caller
+		// wrote.
+		loaded, err := os.ReadFile(filepath.Join(configDir, filepath.Base(payload.Path)))
+		if err != nil {
+			http.Error(w, err.Error(), http.StatusBadRequest)
+			return
+		}
+		time.Sleep(time.Millisecond)
+		mu.Lock()
+		lastLoaded = loaded
+		mu.Unlock()
+		w.WriteHeader(http.StatusNoContent)
+	}))
+	t.Cleanup(controller.Close)
+
+	service := &OpenCodeProxyPoolService{controller: controller.URL, configDir: configDir, httpClient: controller.Client()}
+	var wg sync.WaitGroup
+	for i := 0; i < 8; i++ {
+		wg.Add(1)
+		go func(index int) {
+			defer wg.Done()
+			name := fmt.Sprintf("oc-%d", index)
+			draft := ManagedProxyNodeDraft{
+				ManagedProxyNode: ManagedProxyNode{
+					NodeKey: strings.Repeat(string(rune('a'+index)), 64), MihomoName: name,
+					ListenerPort: 22000 + index, ListenerUsername: "user", ListenerPassword: "password",
+				},
+				ProxyConfig: map[string]any{"name": name, "type": "http", "server": "proxy.example.com", "port": 8080},
+			}
+			if err := service.reloadMihomoWithRollback(context.Background(), []ManagedProxyNodeDraft{draft}, nil); err != nil {
+				t.Errorf("reload %d: %v", index, err)
+			}
+		}(i)
+	}
+	wg.Wait()
+
+	onDisk, err := os.ReadFile(filepath.Join(configDir, "config.yaml"))
+	require.NoError(t, err)
+	mu.Lock()
+	defer mu.Unlock()
+	require.Equal(t, string(lastLoaded), string(onDisk))
 }
 
 func TestPopulateOpenCodeGeo(t *testing.T) {

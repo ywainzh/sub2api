@@ -147,6 +147,7 @@ const authFailedNode = {
 
 describe('OpenCodeProxyPool subscription save flow', () => {
   beforeEach(() => {
+    vi.useRealTimers()
     window.localStorage.setItem('table-page-size', '20')
     Object.values(api).forEach((mock) => mock.mockReset())
     Object.values(notifications).forEach((mock) => mock.mockReset())
@@ -401,6 +402,154 @@ describe('OpenCodeProxyPool subscription save flow', () => {
     expect(window.confirm).toHaveBeenCalledOnce()
     expect(api.deleteOpenCodeManagedNode).toHaveBeenCalledWith(28)
     expect(notifications.showSuccess).toHaveBeenCalled()
+  })
+
+  it('flags a baseline model registry and reveals the ids and error once expanded', async () => {
+    api.getOpenCodeModels.mockResolvedValue({
+      ids: ['big-pickle', 'x-preview-f-free'],
+      count: 2,
+      last_fetched_at: '2026-08-24T02:00:00Z',
+      last_error: 'upstream 503',
+      using_baseline: true
+    })
+    api.refreshOpenCodeModels.mockResolvedValue({ ids: ['big-pickle'], count: 1, using_baseline: false })
+
+    const wrapper = mount(OpenCodeProxyPool, {
+      props: { view: 'subscriptions' },
+      global: { stubs: { Icon: true, BaseDialog: true } }
+    })
+    await flushPromises()
+
+    const panel = wrapper.get('[data-testid="opencode-model-registry"]')
+    expect(panel.classes()).toContain('border-amber-300')
+    expect(panel.text()).toContain('admin.proxies.openCode.modelRegistryBaseline')
+    expect(panel.text()).not.toContain('big-pickle')
+
+    await wrapper.get('[data-testid="opencode-model-registry-toggle"]').trigger('click')
+    expect(panel.text()).toContain('big-pickle')
+    expect(panel.text()).toContain('x-preview-f-free')
+    expect(panel.get('[role="alert"]').text()).toBe('upstream 503')
+
+    await wrapper.get('[data-testid="opencode-model-registry-refresh"]').trigger('click')
+    await flushPromises()
+    expect(api.refreshOpenCodeModels).toHaveBeenCalledOnce()
+    expect(panel.classes()).not.toContain('border-amber-300')
+    expect(panel.text()).toContain('admin.proxies.openCode.modelRegistryLive')
+  })
+
+  it('attributes each node to its subscription and stacks both filters', async () => {
+    const otherSubscription = { ...createdSubscription, id: 3, name: 'external' }
+    api.listSubscriptions.mockResolvedValue([createdSubscription, otherSubscription])
+    api.listSubscriptionNodes.mockImplementation((id: number) =>
+      Promise.resolve(
+        id === 2
+          ? [managedNode, authFailedNode]
+          : [{ ...managedNode, id: 40, subscription_id: 3, node_key: 'node-40', display_name: 'EU node' }]
+      )
+    )
+
+    const wrapper = mount(OpenCodeProxyPool, {
+      props: { view: 'nodes' },
+      global: { stubs: { Icon: true, BaseDialog: true } }
+    })
+    await flushPromises()
+
+    expect(wrapper.text()).toContain('internal')
+    expect(wrapper.text()).toContain('external')
+
+    await wrapper.get('[data-testid="opencode-subscription-filter"]').setValue('2')
+    expect(wrapper.text()).toContain('JP node')
+    expect(wrapper.text()).toContain('US auth failed node')
+    expect(wrapper.text()).not.toContain('EU node')
+
+    await wrapper.get('select').setValue('failed')
+    expect(wrapper.text()).toContain('US auth failed node')
+    expect(wrapper.text()).not.toContain('JP node')
+    expect(wrapper.text()).not.toContain('EU node')
+  })
+
+  it('breaks the subscription node count down by health', async () => {
+    api.listSubscriptions.mockResolvedValue([
+      {
+        ...createdSubscription,
+        node_count: 5,
+        healthy_node_count: 3,
+        failed_node_count: 2,
+        inactive_node_count: 1
+      }
+    ])
+
+    const wrapper = mount(OpenCodeProxyPool, {
+      props: { view: 'subscriptions' },
+      global: { stubs: { Icon: true, BaseDialog: true } }
+    })
+    await flushPromises()
+
+    const breakdown = wrapper.get('[data-testid="opencode-subscription-nodes-2"]')
+    expect(breakdown.findAll('span').map((span) => span.text())).toEqual(['3', '2', '1'])
+    expect(breakdown.findAll('span')[1].classes()).toContain('badge-danger')
+  })
+
+  it('drops the deleted node immediately and reports the background follow-up', async () => {
+    vi.useFakeTimers()
+    api.listSubscriptions.mockResolvedValue([createdSubscription])
+    api.listSubscriptionNodes.mockResolvedValue([managedNode, authFailedNode])
+    api.deleteOpenCodeManagedNode.mockResolvedValue({ message: 'queued' })
+    vi.spyOn(window, 'confirm').mockReturnValue(true)
+
+    const wrapper = mount(OpenCodeProxyPool, {
+      props: { view: 'nodes' },
+      global: { stubs: { Icon: true, BaseDialog: true } }
+    })
+    await flushPromises()
+
+    await wrapper.get('[data-testid="opencode-delete-node-28"]').trigger('click')
+    await flushPromises()
+
+    expect(wrapper.text()).not.toContain('JP node')
+    expect(wrapper.text()).toContain('US auth failed node')
+    // The row is dropped locally, so no second full reload is issued.
+    expect(api.listSubscriptionNodes).toHaveBeenCalledTimes(1)
+
+    api.getOpenCodePool.mockResolvedValue({
+      ...poolStatus,
+      last_reconciled_at: '2026-08-24T03:00:00Z'
+    })
+    await vi.advanceTimersByTimeAsync(2000)
+    await flushPromises()
+
+    expect(notifications.showSuccess).toHaveBeenCalledWith('admin.proxies.openCode.nodeDeleteFollowUpDone')
+    expect(api.listSubscriptionNodes).toHaveBeenCalledTimes(1)
+    vi.useRealTimers()
+  })
+
+  it('surfaces a failed background follow-up after deletion', async () => {
+    vi.useFakeTimers()
+    api.listSubscriptions.mockResolvedValue([createdSubscription])
+    api.listSubscriptionNodes.mockResolvedValue([managedNode])
+    api.deleteOpenCodeManagedNode.mockResolvedValue({ message: 'queued' })
+    vi.spyOn(window, 'confirm').mockReturnValue(true)
+
+    const wrapper = mount(OpenCodeProxyPool, {
+      props: { view: 'nodes' },
+      global: { stubs: { Icon: true, BaseDialog: true } }
+    })
+    await flushPromises()
+
+    await wrapper.get('[data-testid="opencode-delete-node-28"]').trigger('click')
+    await flushPromises()
+
+    api.getOpenCodePool.mockResolvedValue({
+      ...poolStatus,
+      reconcile_status: 'error',
+      reconcile_error: 'mihomo unreachable'
+    })
+    await vi.advanceTimersByTimeAsync(2000)
+    await flushPromises()
+
+    expect(notifications.showError).toHaveBeenCalledWith('admin.proxies.openCode.nodeDeleteFollowUpFailed')
+    expect(wrapper.text()).toContain('mihomo unreachable')
+    vi.useRealTimers()
   })
 
   it('renders the aggregate failure metric as non-interactive text', async () => {

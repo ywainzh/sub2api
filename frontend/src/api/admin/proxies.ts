@@ -30,6 +30,9 @@ export interface ProxySubscription {
   last_success_at?: string | null
   last_error?: string
   node_count: number
+  healthy_node_count: number
+  failed_node_count: number
+  inactive_node_count: number
   last_format?: string
   has_url: boolean
   url_masked: string

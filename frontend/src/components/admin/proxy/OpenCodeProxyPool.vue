@@ -44,6 +44,61 @@
         </div>
       </div>
 
+      <div
+        v-if="modelRegistry"
+        class="mt-3 rounded-xl border bg-white p-3 dark:bg-dark-900"
+        :class="modelRegistry.using_baseline ? 'border-amber-300 dark:border-amber-700' : 'border-gray-200 dark:border-dark-600'"
+        data-testid="opencode-model-registry"
+      >
+        <div class="flex flex-wrap items-center gap-2">
+          <button
+            type="button"
+            class="flex items-center gap-1 text-xs text-gray-500 hover:text-gray-700 dark:text-gray-400 dark:hover:text-gray-200"
+            data-testid="opencode-model-registry-toggle"
+            @click="modelRegistryExpanded = !modelRegistryExpanded"
+          >
+            <Icon :name="modelRegistryExpanded ? 'chevronDown' : 'chevronRight'" size="sm" />
+            {{ t('admin.proxies.openCode.modelRegistry') }}
+          </button>
+          <span class="text-sm font-medium text-gray-900 dark:text-white">
+            {{ t('admin.proxies.openCode.modelRegistryCount', { count: modelRegistry.count }) }}
+          </span>
+          <span class="badge" :class="modelRegistry.using_baseline ? 'badge-warning' : 'badge-gray'">
+            {{
+              modelRegistry.using_baseline
+                ? t('admin.proxies.openCode.modelRegistryBaseline')
+                : t('admin.proxies.openCode.modelRegistryLive')
+            }}
+          </span>
+          <span v-if="modelRegistry.last_error" class="badge badge-danger">{{ t('common.error') }}</span>
+          <span class="text-xs text-gray-500">
+            {{ t('admin.proxies.openCode.modelRegistryFetchedAt', { time: displayTime(modelRegistry.last_fetched_at) }) }}
+          </span>
+          <button
+            class="btn btn-ghost btn-sm ml-auto"
+            type="button"
+            data-testid="opencode-model-registry-refresh"
+            :disabled="refreshingModels"
+            :title="t('common.refresh')"
+            @click="refreshModels"
+          >
+            <Icon name="refresh" size="sm" :class="refreshingModels ? 'animate-spin' : ''" />
+          </button>
+        </div>
+        <p v-if="modelRegistry.using_baseline" class="mt-1.5 text-xs text-amber-600">
+          {{ t('admin.proxies.openCode.modelRegistryBaselineHint') }}
+        </p>
+        <div v-if="modelRegistryExpanded" class="mt-2">
+          <div v-if="modelRegistry.ids.length > 0" class="flex flex-wrap gap-1.5">
+            <span v-for="id in modelRegistry.ids" :key="id" class="badge badge-gray font-mono">{{ id }}</span>
+          </div>
+          <p v-else class="text-xs text-gray-500">{{ t('admin.proxies.openCode.modelRegistryEmpty') }}</p>
+          <p v-if="modelRegistry.last_error" class="mt-2 text-xs text-red-600" role="alert">
+            {{ modelRegistry.last_error }}
+          </p>
+        </div>
+      </div>
+
       <p v-if="pool.reconcile_error" class="mt-2 text-xs text-red-600" role="alert">{{ pool.reconcile_error }}</p>
     </section>
 
@@ -81,6 +136,10 @@
             {{ t('admin.proxies.openCode.unprobed') }}
           </option>
 		  <option value="quarantined">{{ t('admin.proxies.openCode.quarantined') }}</option>
+        </select>
+        <select v-model="subscriptionFilter" class="input w-52" data-testid="opencode-subscription-filter">
+          <option :value="''">{{ t('admin.proxies.openCode.allSubscriptions') }}</option>
+          <option v-for="item in subscriptions" :key="item.id" :value="item.id">{{ item.name }}</option>
         </select>
         <button class="btn btn-secondary" :disabled="loading" :title="t('common.refresh')" @click="loadAll">
           <Icon name="refresh" size="md" :class="loading ? 'animate-spin' : ''" />
@@ -158,7 +217,19 @@
               {{ subscription.url_masked }}
             </td>
             <td class="px-4 py-3 text-gray-700 dark:text-gray-200">
-              {{ subscription.node_count }}
+              <div
+                class="flex items-center gap-1"
+                :title="t('admin.proxies.openCode.nodeBreakdownHint')"
+                :data-testid="`opencode-subscription-nodes-${subscription.id}`"
+              >
+                <span class="badge badge-success">{{ subscription.healthy_node_count }}</span>
+                <span class="badge" :class="subscription.failed_node_count > 0 ? 'badge-danger' : 'badge-gray'">
+                  {{ subscription.failed_node_count }}
+                </span>
+                <span v-if="subscription.inactive_node_count > 0" class="badge badge-gray">
+                  {{ subscription.inactive_node_count }}
+                </span>
+              </div>
             </td>
             <td class="px-4 py-3 text-gray-700 dark:text-gray-200">{{ subscription.sync_interval_minutes }} min</td>
             <td class="max-w-80 px-4 py-3">
@@ -218,6 +289,7 @@
         >
           <tr>
             <th class="px-4 py-3">{{ t('admin.proxies.openCode.name') }}</th>
+            <th class="px-4 py-3">{{ t('admin.proxies.openCode.subscriptionColumn') }}</th>
             <th class="px-4 py-3">{{ t('admin.proxies.columns.protocol') }}</th>
             <th class="px-4 py-3">{{ t('admin.proxies.openCode.exitIp') }}</th>
             <th class="px-4 py-3">{{ t('admin.proxies.openCode.region') }}</th>
@@ -247,6 +319,9 @@
               <div class="mt-0.5 font-mono text-xs text-gray-400">
 				#{{ node.proxy_id ?? '-' }} · {{ node.transport_mode === 'direct_http' ? t('admin.proxies.openCode.directHttp') : `:${node.listener_port}` }}
               </div>
+            </td>
+            <td class="px-4 py-3 text-xs text-gray-700 dark:text-gray-200">
+              {{ subscriptionById.get(node.subscription_id)?.name || `#${node.subscription_id}` }}
             </td>
             <td class="px-4 py-3">
               <span class="badge badge-gray">{{ node.protocol.toUpperCase() }}</span>
@@ -490,6 +565,7 @@ import type {
 	OpenCodeMaintenanceJob,
 	OpenCodeMaintenanceStatus,
   OpenCodeNodeProbeResult,
+  OpenCodeModelRegistryStatus,
   OpenCodePool,
   OpenCodePoolWorker,
   ProxySubscription
@@ -524,6 +600,10 @@ const subscriptionPagination = reactive({ page: 1, page_size: initialPageSize })
 const nodePagination = reactive({ page: 1, page_size: initialPageSize })
 type NodeHealthFilter = '' | 'healthy' | 'rate_limited' | 'duplicate_exit' | 'failed' | 'transport_error' | 'unprobed' | 'quarantined'
 const healthFilter = ref<NodeHealthFilter>('')
+const subscriptionFilter = ref<number | ''>('')
+const modelRegistry = ref<OpenCodeModelRegistryStatus | null>(null)
+const modelRegistryExpanded = ref(false)
+const refreshingModels = ref(false)
 const showDialog = ref(false)
 const editing = ref<ProxySubscription | null>(null)
 const saving = ref(false)
@@ -545,6 +625,12 @@ const isOtherFailedNode = (node: ManagedProxyNode) =>
   isPoolNode(node) &&
   !['healthy', 'rate_limited', 'duplicate_exit'].includes(node.health_status)
 const filteredNodes = computed(() => {
+  const matchesSubscription = (node: ManagedProxyNode) =>
+    subscriptionFilter.value === '' || node.subscription_id === subscriptionFilter.value
+  return healthMatchedNodes.value.filter(matchesSubscription)
+})
+
+const healthMatchedNodes = computed(() => {
   if (!healthFilter.value) return nodes.value
   if (healthFilter.value === 'failed') return nodes.value.filter(isOtherFailedNode)
   if (healthFilter.value === 'duplicate_exit') {
@@ -577,6 +663,11 @@ const workerByNodeId = computed(() => {
   for (const worker of workers.value) {
     if (worker.managed_node_id) mapped.set(worker.managed_node_id, worker)
   }
+  return mapped
+})
+const subscriptionById = computed(() => {
+  const mapped = new Map<number, ProxySubscription>()
+  for (const subscription of subscriptions.value) mapped.set(subscription.id, subscription)
   return mapped
 })
 const displayTime = (value?: string | null) => (value ? new Date(value).toLocaleString() : '-')
@@ -636,6 +727,9 @@ const workerLabel = (status: string) =>
 let probeStartedAt = 0
 let probeElapsedTimer: number | undefined
 let disposed = false
+let followUpWatching = false
+const FOLLOW_UP_POLL_INTERVAL_MS = 2000
+const FOLLOW_UP_TIMEOUT_MS = 60000
 
 function startProbeProgress(nodeIds: number[]) {
   if (probeElapsedTimer !== undefined) window.clearInterval(probeElapsedTimer)
@@ -678,16 +772,18 @@ function summarizeProbeResults(results: OpenCodeNodeProbeResult[]) {
 async function loadAll() {
   loading.value = true
   try {
-	const [subscriptionItems, poolStatus, poolWorkers, maintenanceStatus] = await Promise.all([
+	const [subscriptionItems, poolStatus, poolWorkers, maintenanceStatus, models] = await Promise.all([
       adminAPI.proxies.listSubscriptions(),
       adminAPI.proxies.getOpenCodePool(),
 	  adminAPI.proxies.listOpenCodePoolWorkers(),
-	  adminAPI.proxies.getOpenCodeMaintenance()
+	  adminAPI.proxies.getOpenCodeMaintenance(),
+	  adminAPI.proxies.getOpenCodeModels()
     ])
     subscriptions.value = subscriptionItems
     pool.value = poolStatus
     workers.value = poolWorkers
 	maintenance.value = maintenanceStatus
+	modelRegistry.value = models
     if (props.view === 'nodes') {
       const batches = await Promise.all(
         subscriptions.value.map((item) => adminAPI.proxies.listSubscriptionNodes(item.id))
@@ -941,13 +1037,62 @@ async function submitProxyImport() {
 	}
 }
 
+async function refreshModels() {
+	if (refreshingModels.value) return
+	refreshingModels.value = true
+	try {
+		modelRegistry.value = await adminAPI.proxies.refreshOpenCodeModels()
+		appStore.showSuccess(t('admin.proxies.openCode.modelRegistryRefreshed'))
+	} catch (error) {
+		appStore.showError(errorMessage(error))
+	} finally {
+		refreshingModels.value = false
+	}
+}
+
+// The delete endpoint returns before Mihomo is reloaded and the workers are
+// reconciled. Comparing last_reconciled_at against its value at delete time uses
+// the server clock only, so it is immune to browser clock skew, and it still
+// resolves when the background pass finishes before the first poll.
+async function watchDeletionFollowUp(since: string | null | undefined) {
+	if (followUpWatching) return
+	followUpWatching = true
+	try {
+		const deadline = Date.now() + FOLLOW_UP_TIMEOUT_MS
+		while (Date.now() < deadline) {
+			await new Promise((resolve) => window.setTimeout(resolve, FOLLOW_UP_POLL_INTERVAL_MS))
+			if (disposed) return
+			const status = await adminAPI.proxies.getOpenCodePool()
+			pool.value = status
+			if (status.reconcile_status === 'error') {
+				appStore.showError(
+					t('admin.proxies.openCode.nodeDeleteFollowUpFailed', { error: status.reconcile_error || '' })
+				)
+				return
+			}
+			if (status.last_reconciled_at && status.last_reconciled_at !== since) {
+				workers.value = await adminAPI.proxies.listOpenCodePoolWorkers()
+				appStore.showSuccess(t('admin.proxies.openCode.nodeDeleteFollowUpDone'))
+				return
+			}
+		}
+		appStore.showWarning(t('admin.proxies.openCode.nodeDeleteFollowUpSlow'))
+	} catch (error) {
+		appStore.showError(errorMessage(error))
+	} finally {
+		followUpWatching = false
+	}
+}
+
 async function deleteNode(node: ManagedProxyNode) {
 	if (!window.confirm(t('admin.proxies.openCode.deleteNodeConfirm', { name: node.display_name }))) return
 	deletingNodeIds.value = new Set(deletingNodeIds.value).add(node.id)
+	const reconciledBefore = pool.value?.last_reconciled_at
 	try {
 		await adminAPI.proxies.deleteOpenCodeManagedNode(node.id)
+		nodes.value = nodes.value.filter((item) => item.id !== node.id)
 		appStore.showSuccess(t('admin.proxies.openCode.nodeDeleted'))
-		await loadAll()
+		void watchDeletionFollowUp(reconciledBefore)
 	} catch (error) {
 		appStore.showError(errorMessage(error))
 	} finally {
@@ -960,6 +1105,9 @@ async function deleteNode(node: ManagedProxyNode) {
 watch(() => subscriptions.value.length, (total) => clampPage(total, subscriptionPagination))
 watch(() => filteredNodes.value.length, (total) => clampPage(total, nodePagination))
 watch(healthFilter, () => {
+  nodePagination.page = 1
+})
+watch(subscriptionFilter, () => {
   nodePagination.page = 1
 })
 watch(() => props.view, loadAll)

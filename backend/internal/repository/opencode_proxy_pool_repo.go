@@ -59,7 +59,60 @@ func (r *openCodeProxyPoolRepository) ListSubscriptions(ctx context.Context) ([]
 		}
 		items = append(items, *item)
 	}
-	return items, rows.Err()
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	if err := r.fillSubscriptionNodeStats(ctx, items); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
+// fillSubscriptionNodeStats derives per-subscription node counts from
+// managed_proxy_nodes. The denormalized proxy_subscriptions.node_count column is
+// only rewritten when a subscription syncs, so it drifts as soon as a single node
+// is deleted; these aggregates replace it.
+func (r *openCodeProxyPoolRepository) fillSubscriptionNodeStats(ctx context.Context, items []service.ProxySubscription) error {
+	if len(items) == 0 {
+		return nil
+	}
+	rows, err := r.db.QueryContext(ctx, `
+		SELECT subscription_id,
+			COUNT(*) FILTER (WHERE sync_status='active' AND health_status='healthy' AND duplicate_of_node_id IS NULL),
+			COUNT(*) FILTER (WHERE sync_status='active' AND (health_status<>'healthy' OR duplicate_of_node_id IS NOT NULL)),
+			COUNT(*) FILTER (WHERE sync_status<>'active')
+		FROM managed_proxy_nodes
+		WHERE deleted_at IS NULL
+		GROUP BY subscription_id`)
+	if err != nil {
+		return err
+	}
+	defer func() { _ = rows.Close() }()
+	type nodeStats struct {
+		healthy  int
+		failed   int
+		inactive int
+	}
+	stats := make(map[int64]nodeStats, len(items))
+	for rows.Next() {
+		var id int64
+		var entry nodeStats
+		if err := rows.Scan(&id, &entry.healthy, &entry.failed, &entry.inactive); err != nil {
+			return err
+		}
+		stats[id] = entry
+	}
+	if err := rows.Err(); err != nil {
+		return err
+	}
+	for i := range items {
+		entry := stats[items[i].ID]
+		items[i].HealthyNodeCount = entry.healthy
+		items[i].FailedNodeCount = entry.failed
+		items[i].InactiveNodeCount = entry.inactive
+		items[i].NodeCount = entry.healthy + entry.failed
+	}
+	return nil
 }
 
 func (r *openCodeProxyPoolRepository) GetSubscription(ctx context.Context, id int64) (*service.ProxySubscription, error) {

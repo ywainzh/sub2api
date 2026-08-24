@@ -311,15 +311,75 @@ func (s *OpenCodeProxyPoolService) CleanupExpiredUploadedSubscriptions(ctx conte
 	return result, nil
 }
 
+// DeleteManagedNode removes the node in a single fast transaction and hands the
+// expensive follow-up (recomputing the Mihomo config plus a full worker
+// reconcile) to a background gate, so the admin request does not block on it.
+// Progress is observable through the pool's reconcile_status/last_reconciled_at.
 func (s *OpenCodeProxyPoolService) DeleteManagedNode(ctx context.Context, nodeID int64) error {
 	if err := s.repo.DeleteManagedNode(ctx, nodeID, "manual"); err != nil {
 		return err
 	}
-	if err := s.reloadAfterManagedNodeDeletion(ctx); err != nil {
-		return err
+	s.setPoolReconcileState(ctx, "pending", "")
+	s.scheduleNodeTopologyReload()
+	return nil
+}
+
+// scheduleNodeTopologyReload coalesces bursts of deletions: a run already in
+// flight is re-armed instead of queueing another, so deleting N nodes triggers at
+// most two reload+reconcile passes.
+func (s *OpenCodeProxyPoolService) scheduleNodeTopologyReload() {
+	s.topologyMu.Lock()
+	s.topologyDirty = true
+	if s.topologyRunning {
+		s.topologyMu.Unlock()
+		return
 	}
-	_, err := s.ReconcileWorkers(ctx)
-	return err
+	s.topologyRunning = true
+	s.topologyMu.Unlock()
+	go func() {
+		for {
+			s.topologyMu.Lock()
+			if !s.topologyDirty {
+				// Clearing the flag under the same lock as the check keeps a
+				// concurrent scheduler from observing running=true and skipping
+				// its own goroutine while this one is already exiting.
+				s.topologyRunning = false
+				s.topologyMu.Unlock()
+				return
+			}
+			s.topologyDirty = false
+			s.topologyMu.Unlock()
+			s.runNodeTopologyReload()
+		}
+	}()
+}
+
+func (s *OpenCodeProxyPoolService) runNodeTopologyReload() {
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Minute)
+	defer cancel()
+	if err := s.reloadAfterManagedNodeDeletion(ctx); err != nil {
+		slog.Error("opencode_node_topology_reload_failed", "error", err)
+		// ReconcileWorkers would overwrite reconcile_status with 'ok', hiding this
+		// failure, so record it and stop here.
+		s.setPoolReconcileState(ctx, "error", truncateOpenCodeStatusError(err.Error()))
+		return
+	}
+	if _, err := s.ReconcileWorkers(ctx); err != nil {
+		slog.Error("opencode_node_topology_reconcile_failed", "error", err)
+	}
+}
+
+func (s *OpenCodeProxyPoolService) setPoolReconcileState(ctx context.Context, status, message string) {
+	pool, err := s.GetPool(ctx)
+	if err != nil {
+		slog.Warn("opencode_pool_reconcile_state_skipped", "status", status, "error", err)
+		return
+	}
+	pool.ReconcileStatus = status
+	pool.ReconcileError = message
+	if _, err := s.repo.UpdateOpenCodePool(ctx, *pool); err != nil {
+		slog.Warn("opencode_pool_reconcile_state_write_failed", "status", status, "error", err)
+	}
 }
 
 func (s *OpenCodeProxyPoolService) reloadAfterManagedNodeDeletion(ctx context.Context) error {

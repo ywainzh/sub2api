@@ -335,7 +335,7 @@ func (h *ProxyHandler) DeleteOpenCodeManagedNode(c *gin.Context) {
 		writeOpenCodeProxyPoolError(c, err)
 		return
 	}
-	response.Success(c, gin.H{"message": "Managed OpenCode node deleted"})
+	response.Success(c, gin.H{"id": id, "message": "Managed OpenCode node deleted; Mihomo reload and worker reconcile are running in the background"})
 }
 
 func (h *ProxyHandler) GetOpenCodeModels(c *gin.Context) {

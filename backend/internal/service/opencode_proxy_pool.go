@@ -64,6 +64,9 @@ type ProxySubscription struct {
 	LastSuccessAt       *time.Time `json:"last_success_at"`
 	LastError           string     `json:"last_error,omitempty"`
 	NodeCount           int        `json:"node_count"`
+	HealthyNodeCount    int        `json:"healthy_node_count"`
+	FailedNodeCount     int        `json:"failed_node_count"`
+	InactiveNodeCount   int        `json:"inactive_node_count"`
 	LastFormat          string     `json:"last_format,omitempty"`
 	LastUserAgent       string     `json:"last_user_agent,omitempty"`
 	HasURL              bool       `json:"has_url"`
@@ -293,6 +296,12 @@ type OpenCodeProxyPoolService struct {
 	configDir            string
 	proxyHost            string
 	syncMu               sync.Mutex
+	// mihomoMu serializes the write-candidate → controller-load-by-path → promote
+	// sequence. Concurrent runs can have the controller load one candidate while a
+	// different candidate's bytes get promoted to config.yaml, leaving the runtime
+	// state diverged from disk until the next reload. Distinct from syncMu, which
+	// several reload callers already hold.
+	mihomoMu             sync.Mutex
 	modelMu              sync.RWMutex
 	modelStatus          OpenCodeModelRegistryStatus
 	poolMu               sync.RWMutex
@@ -300,6 +309,9 @@ type OpenCodeProxyPoolService struct {
 	probeMu              sync.Mutex
 	retryMu              sync.Mutex
 	retryRunning         bool
+	topologyMu           sync.Mutex
+	topologyDirty        bool
+	topologyRunning      bool
 	stop                 chan struct{}
 	stopOnce             sync.Once
 	nextMaintenanceMu    sync.RWMutex
@@ -539,11 +551,13 @@ func (s *OpenCodeProxyPoolService) DeleteSubscription(ctx context.Context, id in
 }
 
 func (s *OpenCodeProxyPoolService) reloadPersistedMihomo(ctx context.Context) error {
+	s.mihomoMu.Lock()
+	defer s.mihomoMu.Unlock()
 	drafts, err := s.mergeEnabledSubscriptionDrafts(ctx, -1, nil)
 	if err != nil {
 		return err
 	}
-	return s.reloadMihomo(ctx, drafts)
+	return s.reloadMihomoLocked(ctx, drafts)
 }
 
 func (s *OpenCodeProxyPoolService) ListNodes(ctx context.Context, subscriptionID *int64) ([]ManagedProxyNode, error) {
@@ -964,9 +978,11 @@ func (s *OpenCodeProxyPoolService) SyncSubscription(ctx context.Context, id int6
 }
 
 func (s *OpenCodeProxyPoolService) reloadMihomoWithRollback(ctx context.Context, drafts []ManagedProxyNodeDraft, previous []byte) error {
-	if err := s.reloadMihomo(ctx, drafts); err != nil {
+	s.mihomoMu.Lock()
+	defer s.mihomoMu.Unlock()
+	if err := s.reloadMihomoLocked(ctx, drafts); err != nil {
 		if len(previous) > 0 {
-			if restoreErr := s.restoreMihomoConfig(ctx, previous); restoreErr != nil {
+			if restoreErr := s.restoreMihomoConfigLocked(ctx, previous); restoreErr != nil {
 				return fmt.Errorf("reload Mihomo candidate: %w; restore last-known-good: %v", err, restoreErr)
 			}
 		}
@@ -1026,7 +1042,7 @@ func nodeIDs(nodes []ManagedProxyNode) []int64 {
 	return ids
 }
 
-func (s *OpenCodeProxyPoolService) reloadMihomo(ctx context.Context, drafts []ManagedProxyNodeDraft) error {
+func (s *OpenCodeProxyPoolService) reloadMihomoLocked(ctx context.Context, drafts []ManagedProxyNodeDraft) error {
 	proxies := make([]map[string]any, 0, len(drafts))
 	listeners := make([]map[string]any, 0, len(drafts))
 	for _, draft := range drafts {
@@ -1089,6 +1105,12 @@ func (s *OpenCodeProxyPoolService) loadMihomoConfig(ctx context.Context, path st
 }
 
 func (s *OpenCodeProxyPoolService) restoreMihomoConfig(ctx context.Context, previous []byte) error {
+	s.mihomoMu.Lock()
+	defer s.mihomoMu.Unlock()
+	return s.restoreMihomoConfigLocked(ctx, previous)
+}
+
+func (s *OpenCodeProxyPoolService) restoreMihomoConfigLocked(ctx context.Context, previous []byte) error {
 	if len(previous) == 0 {
 		return errors.New("last-known-good Mihomo config is unavailable")
 	}
