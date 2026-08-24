@@ -301,21 +301,21 @@ type OpenCodeProxyPoolService struct {
 	// different candidate's bytes get promoted to config.yaml, leaving the runtime
 	// state diverged from disk until the next reload. Distinct from syncMu, which
 	// several reload callers already hold.
-	mihomoMu             sync.Mutex
-	modelMu              sync.RWMutex
-	modelStatus          OpenCodeModelRegistryStatus
-	poolMu               sync.RWMutex
-	poolStatus           *OpenCodePool
-	probeMu              sync.Mutex
-	retryMu              sync.Mutex
-	retryRunning         bool
-	topologyMu           sync.Mutex
-	topologyDirty        bool
-	topologyRunning      bool
-	stop                 chan struct{}
-	stopOnce             sync.Once
-	nextMaintenanceMu    sync.RWMutex
-	nextMaintenanceAt    time.Time
+	mihomoMu          sync.Mutex
+	modelMu           sync.RWMutex
+	modelStatus       OpenCodeModelRegistryStatus
+	poolMu            sync.RWMutex
+	poolStatus        *OpenCodePool
+	probeMu           sync.Mutex
+	retryMu           sync.Mutex
+	retryRunning      bool
+	topologyMu        sync.Mutex
+	topologyDirty     bool
+	topologyRunning   bool
+	stop              chan struct{}
+	stopOnce          sync.Once
+	nextMaintenanceMu sync.RWMutex
+	nextMaintenanceAt time.Time
 }
 
 func NewOpenCodeProxyPoolService(repo OpenCodeProxyPoolRepository, encryptor SecretEncryptor, settingRepo SettingRepository, accountRepo AccountRepository, deps ...any) *OpenCodeProxyPoolService {
